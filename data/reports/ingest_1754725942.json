@@ -1,0 +1,8 @@
+{
+  "total": 190,
+  "ok": 0,
+  "failed": 190,
+  "anomalies": {
+    "ValueError": 190
+  }
+}

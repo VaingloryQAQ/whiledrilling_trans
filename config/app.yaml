@@ -1,0 +1,14 @@
+compat_mode: true
+normalize_enabled: true
+units_normalize: true
+scoring_enabled: false
+near_dup_enabled: false
+batch_size: 500
+thumb_max_side: 512
+alert_threshold: 0.10
+depth_group:
+  granularity: 1.0
+  tolerance: 1.5
+sample_sensitive:
+  - 岩屑
+  - 壁心

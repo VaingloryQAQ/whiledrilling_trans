@@ -1,0 +1,8 @@
+{
+  "total": 1416,
+  "ok": 0,
+  "failed": 1416,
+  "anomalies": {
+    "ValueError": 1416
+  }
+}

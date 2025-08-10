@@ -1,0 +1,8 @@
+{
+  "total": 782,
+  "ok": 0,
+  "failed": 782,
+  "anomalies": {
+    "UnboundLocalError": 782
+  }
+}

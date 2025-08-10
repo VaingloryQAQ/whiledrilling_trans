@@ -1,0 +1,41 @@
+categories:
+  - name: 荧光扫描
+    mode: dir
+    require_any: ["荧光扫描"]
+    side_view_tokens: ["切面","侧面"]
+  - name: 单偏光
+    mode: file
+    require_all: ["薄片鉴定","单偏光"]
+  - name: 正交光
+    mode: file
+    require_all: ["薄片鉴定","正交光"]
+  - name: 三维指纹
+    mode: dir
+    require_any: ["三维定量"]
+    image_tokens_any: ["指纹图","等值图"]
+    sample_sensitive: ["壁心","岩屑"]
+  - name: 三维立体
+    mode: dir
+    require_any: ["三维定量"]
+    image_tokens_any: ["立体图","三维图"]
+    sample_sensitive: ["壁心","岩屑"]
+  - name: 色谱
+    mode: dir
+    prefer_dirs_any: ["地化导出"]
+    require_any: ["地化录井"]
+    image_tokens_any: ["色谱分析谱图","色谱","色谱谱图","组分"]
+    sample_sensitive: ["壁心","岩屑"]
+  - name: 轻烃谱图
+    mode: dir
+    prefer_dirs_any: ["地化导出"]
+    require_all: ["地化录井","轻烃"]
+    sample_sensitive: ["壁心","岩屑"]
+sample_types:
+  - label: 岩屑
+    tokens: ["岩屑"]
+  - label: 壁心
+    tokens: ["壁心","壁取心","壁芯"]
+  - label: 岩心
+    tokens: ["岩心","取心"]
+  - label: 泥浆
+    tokens: ["泥浆"]

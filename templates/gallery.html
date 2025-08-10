@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}<h1>画廊</h1>
+<form method="get" class="filters card">
+<div><label>井名</label><input type="text" name="well" value="{{ filters.well }}"></div>
+<div><label>类别</label><select name="category"><option value="">全部</option>{% for c in cats %}
+<option value="{{ c }}" {% if c == filters.category %}selected{% endif %}>{{ c }}</option>{% endfor %}</select></div>
+<div><label>样品类型</label><select name="sample_type"><option value="">全部</option>{% for s in stypes %}
+<option value="{{ s }}" {% if s == filters.sample_type %}selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
+<div><label>深度范围</label>
+<input type="number" step="0.01" name="depth_min" placeholder="最小" value="{{ filters.depth_min }}">
+<input type="number" step="0.01" name="depth_max" placeholder="最大" value="{{ filters.depth_max }}"></div>
+<div><label>每页</label><input type="number" name="per_page" min="10" max="200" value="{{ filters.per_page }}"></div>
+<button type="submit">筛选</button><a class="btn-secondary" href="/gallery">重置</a>
+<span class="count">共 {{ filters.total_count }} 张</span></form>
+<div class="grid">{% for it in items %}<div class="card img-card">
+<a href="/files/{{ it.rel_path }}" target="_blank"><img src="/thumbs/{{ it.thumb_path or it.rel_path }}" alt="{{ it.rel_path }}" loading="lazy" /></a>
+<div class="meta"><div>井：{{ it.well_name or "—" }}</div><div>类：{{ it.category or "—" }}</div>
+<div>样：{{ it.sample_type or "—" }}</div>
+<div>深：{% if it.start_depth is not none and it.end_depth is not none %}{{ '%.2f'|format(it.start_depth) }}–{{ '%.2f'|format(it.end_depth) }} m{% else %}—{% endif %}</div>
+{% if it.anomalies %}<div class="anomaly">⚠ {{ it.anomalies }}</div>{% endif %}</div></div>{% endfor %}</div>
+<div class="pager">{% if filters.page|int > 1 %}
+<a href="?well={{filters.well}}&category={{filters.category}}&sample_type={{filters.sample_type}}&depth_min={{filters.depth_min}}&depth_max={{filters.depth_max}}&per_page={{filters.per_page}}&page={{filters.page|int - 1}}">上一页</a>{% endif %}
+<span>第 {{ filters.page }} 页</span>
+{% if (filters.page|int * filters.per_page|int) < filters.total_count %}
+<a href="?well={{filters.well}}&category={{filters.category}}&sample_type={{filters.sample_type}}&depth_min={{filters.depth_min}}&depth_max={{filters.depth_max}}&per_page={{filters.per_page}}&page={{filters.page|int + 1}}">下一页</a>{% endif %}
+</div>{% endblock %}

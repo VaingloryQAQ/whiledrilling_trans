@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}<h1>上传压缩包</h1>
+<form action="/upload" method="post" enctype="multipart/form-data" class="card">
+<label>选择 ZIP：<input type="file" name="files" accept=".zip" multiple /></label>
+<button type="submit">上传并入库</button></form>
+<p class="hint">上传后将自动解压到 <code>data/extracted/</code> 并解析入库；缩略图在 <code>data/thumbs/</code>。</p>
+{% endblock %}

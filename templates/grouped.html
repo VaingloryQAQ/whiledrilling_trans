@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container">
+
+  <h2 style="margin: 16px 0;">分组视图（深度行 × 类别列）</h2>
+
+  <div class="card" style="padding: 16px;">
+    <div style="display:flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+      <label>井名（可模糊）</label>
+      <input id="wellInput" type="text" value="{{ well }}" placeholder="例如：BZ8-3S-11" />
+      <button id="btnQuery" class="btn">查询</button>
+
+      <label style="margin-left: 24px;">
+        <input type="checkbox" id="seqToggle" />
+        顺序约束（后一行深度 > 前一行）
+      </label>
+    </div>
+  </div>
+
+  <div id="tableContainer" style="margin-top: 16px;"></div>
+</div>
+
+<script>
+// 简易工具
+function el(tag, attrs={}, children=[]) {
+  const e = document.createElement(tag);
+  for (const [k,v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k === 'html') e.innerHTML = v;
+    else e.setAttribute(k, v);
+  }
+  if (!Array.isArray(children)) children = [children];
+  children.filter(Boolean).forEach(c => e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+  return e;
+}
+
+const state = { data: null, selection: {}, seqEnforced: false };
+
+async function loadData() {
+  const well = document.getElementById('wellInput').value.trim();
+  const url = new URL('/api/grouped-data', window.location.origin);
+  if (well) url.searchParams.set('well', well);
+  const res = await fetch(url.toString());
+  const data = await res.json();
+  state.data = data;
+
+  // NEW: 用后端返回的井名回填输入框，避免只是占位符
+  if (data.well) document.getElementById('wellInput').value = data.well;
+
+  renderTable();
+}
+
+function renderTable() {
+  const ctn = document.getElementById('tableContainer');
+  ctn.innerHTML = '';
+
+  const d = state.data;
+  if (!d || !d.segments || d.segments.length === 0) {
+    ctn.appendChild(el('div', {class:'card', html:'没有数据，换个井名试试。'}));
+    return;
+  }
+
+  // 表头
+  const headRow = el('div', {class:'grid-row'});
+  headRow.appendChild(el('div', {class:'grid-cell head'}, '井名'));
+  headRow.appendChild(el('div', {class:'grid-cell head'}, '深度（选择锚）'));
+  d.categories.forEach(cat => headRow.appendChild(el('div', {class:'grid-cell head'}, cat)));
+  ctn.appendChild(headRow);
+
+  d.segments.forEach((seg, i) => {
+    const row = el('div', {class:'grid-row', 'data-row': i});
+
+    // 井名（NEW：显示后端返回的单井名）
+    row.appendChild(el('div', {class:'grid-cell'}, d.well || '—'));
+
+    // 深度段选择 + 荧光锚选择
+    const depthCell = el('div', {class:'grid-cell'});
+    const segSel = el('select', {class:'select', style:'min-width: 220px;'});
+    d.segments.forEach((s, idx) => {
+      const op = el('option', {value: s.id}, `${s.label}`);
+      if (idx === i) op.selected = true;
+      segSel.appendChild(op);
+    });
+    depthCell.appendChild(segSel);
+
+    const anchorsWrap = el('span', {style:'margin-left:8px;'});
+    const anchorSel = el('select', {class:'select', style:'min-width: 160px;'});
+    anchorSel.appendChild(el('option', {value:''}, '无荧光锚'));
+    seg.anchor_options.forEach((a, j) => {
+      const lab = a.depth_label || (a.center != null ? a.center.toFixed(2)+' m' : `#${j+1}`);
+      anchorSel.appendChild(el('option', {value: a.center ?? ''}, `荧光 ${lab}`));
+    });
+    if (seg.anchor_options.length > 0) anchorSel.selectedIndex = 1;
+    anchorsWrap.appendChild(anchorSel);
+    depthCell.appendChild(anchorsWrap);
+    row.appendChild(depthCell);
+
+    const cellWraps = {};
+    d.categories.forEach(cat => {
+      const cell = el('div', {class:'grid-cell'});
+      const box = el('div', {class:'thumb-box'});
+      cell.appendChild(box);
+      row.appendChild(cell);
+      cellWraps[cat] = box;
+    });
+
+    ctn.appendChild(row);
+
+    state.selection[i] = { segId: d.segments[i].id, anchorCenter: seg.anchor_options[0]?.center ?? null };
+
+    function renderCellsForRow() {
+      const sel = state.selection[i];
+      const segId = sel.segId;
+      const anchorCenter = sel.anchorCenter;
+
+      const packs = d.imagesBySegment[segId];
+
+      d.categories.forEach(cat => {
+        const cell = cellWraps[cat];
+        cell.innerHTML = '';
+
+        const list = packs[cat] || [];
+        if (list.length === 0) {
+          cell.appendChild(el('div', {class:'thumb noimg'}, '—'));
+          return;
+        }
+
+        let idxBest = 0;
+        if (anchorCenter != null) {
+          let best = 1e18;
+          list.forEach((it, k) => {
+            const diff = (it.center != null) ? Math.abs(it.center - anchorCenter) : 1e9;
+            if (diff < best) { best = diff; idxBest = k; }
+          });
+        }
+        const it = list[idxBest];
+
+        const fig = el('div', {class:'thumb'});
+        const im = el('img', {src: it.thumb_url || it.file_url, alt: cat});
+        const cap = el('div', {class:'caption'}, it.depth_label || '—');
+        fig.appendChild(im); fig.appendChild(cap);
+
+        if (list.length > 1) fig.appendChild(el('div', {class:'badge'}, `×${list.length}`));
+        fig.addEventListener('click', () => window.open(it.file_url, '_blank'));
+        cell.appendChild(fig);
+      });
+    }
+
+    renderCellsForRow();
+
+    segSel.addEventListener('change', () => {
+      state.selection[i].segId = segSel.value;
+      const curSeg = d.segments.find(s => s.id === segSel.value);
+      anchorSel.innerHTML = '';
+      anchorSel.appendChild(el('option', {value:''}, '无荧光锚'));
+      (curSeg.anchor_options || []).forEach((a, j) => {
+        const lab = a.depth_label || (a.center != null ? a.center.toFixed(2)+' m' : `#${j+1}`);
+        anchorSel.appendChild(el('option', {value: a.center ?? ''}, `荧光 ${lab}`));
+      });
+      anchorSel.selectedIndex = (curSeg.anchor_options && curSeg.anchor_options.length) ? 1 : 0;
+      state.selection[i].anchorCenter = (curSeg.anchor_options && curSeg.anchor_options.length) ? curSeg.anchor_options[0].center : null;
+
+      enforceSeqFrom(i - 1);
+      renderCellsForRow();
+    });
+
+    anchorSel.addEventListener('change', () => {
+      const v = anchorSel.value;
+      state.selection[i].anchorCenter = (v === '' ? null : parseFloat(v));
+      renderCellsForRow();
+    });
+  });
+
+  enforceSeqFrom(-1);
+}
+
+function enforceSeqFrom(startRow) {
+  const enforce = state.seqEnforced;
+  const d = state.data; if (!d) return;
+
+  const centerMap = {}; d.segments.forEach(s => centerMap[s.id] = s.center);
+  const segSelectors = [...document.querySelectorAll('.grid-row select.select')].filter((_, idx) => idx % 2 === 0);
+
+  let prevCenter = null;
+  for (let i = 0; i < segSelectors.length; i++) {
+    const segSel = segSelectors[i];
+    for (const op of segSel.options) op.disabled = false;
+
+    if (enforce && prevCenter != null) {
+      for (const op of segSel.options) {
+        const c = centerMap[op.value];
+        if (c <= prevCenter) op.disabled = true;
+      }
+      if (segSel.selectedOptions.length && segSel.selectedOptions[0].disabled) {
+        const ok = [...segSel.options].find(o => !o.disabled);
+        if (ok) { segSel.value = ok.value; segSel.dispatchEvent(new Event('change')); }
+      }
+    }
+    prevCenter = centerMap[segSel.value];
+  }
+}
+
+document.getElementById('btnQuery').addEventListener('click', loadData);
+document.getElementById('seqToggle').addEventListener('change', (e) => {
+  state.seqEnforced = e.target.checked; enforceSeqFrom(-1);
+});
+
+loadData();
+</script>
+
+<style>
+.container { max-width: 1200px; margin: 0 auto; }
+.card { background: #1f2633; border-radius: 12px; padding: 12px; }
+.btn { padding: 6px 14px; border-radius: 8px; background:#2f6fed; color:#fff; border:0; cursor:pointer; }
+.select { padding: 6px 8px; border-radius: 8px; background:#0f1420; color:#dbe2f7; border:1px solid #2a3650; }
+
+.grid-row { display: grid; grid-template-columns: 160px 280px repeat(7, 1fr); gap: 8px; align-items: stretch; margin-bottom: 10px; }
+.grid-cell { background:#0f1420; border:1px solid #2a3650; border-radius:10px; padding:8px; min-height: 92px; display:flex; align-items:center; justify-content:center; }
+.grid-cell.head { background:#0b1020; font-weight: 600; }
+
+.thumb-box { width: 100%; display:flex; align-items:center; justify-content:center; }
+.thumb { width: 120px; height: 120px; overflow: hidden; border-radius: 10px; position: relative; display:flex; flex-direction: column; gap:6px; align-items:center; justify-content:center; }
+.thumb img { max-width: 120px; max-height: 90px; object-fit: cover; display:block; }
+.caption { font-size: 12px; color:#c6d2f5; }
+.noimg { color:#5f6c8f; }
+.badge { position:absolute; top:4px; right:4px; background:#2a3650; color:#cdd8ff; font-size:12px; padding:2px 6px; border-radius: 8px; }
+</style>
+{% endblock %}
