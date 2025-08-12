@@ -20,6 +20,7 @@ from .config import BASE_DIR, DATA_DIR, UPLOADS_DIR, EXTRACTED_DIR, THUMBS_DIR, 
 from .models import Image
 from .ingest import init_db, unzip, ingest_dir, DB_PATH
 from .grouping import build_grouped_data
+from .database import get_db_session, optimized_queries
 
 import io
 import os
@@ -34,10 +35,18 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, R
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
+from .middleware import setup_middleware, AppException, handle_app_exception
 
 from .extract import extract_archive
 
 app = FastAPI(title="Drill Image Web")
+
+# 设置中间件
+setup_middleware(app)
+
+# 添加异常处理器
+app.add_exception_handler(AppException, handle_app_exception)
+
 # 简单内存 LRU（按需可换 disk cache）
 _PREVIEW_CACHE = {}  # key -> bytes
 _PREVIEW_CACHE_MAX = 128
@@ -57,8 +66,12 @@ init_db()
 
 
 def get_sess():
-    with Session(engine) as sess:
-        yield sess
+    """获取数据库会话（使用优化版本）"""
+    session = get_db_session()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -116,19 +129,33 @@ def _process_upload_job(job_id: str, saved_path: Path) -> None:
         job.update({"status": "error", "message": f"{type(e).__name__}: {e}", "current": ""})
 
 @app.post("/api/upload")
-async def api_upload(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
+async def api_upload(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...), request: Request):
+    """上传ZIP包，后台解压并导入"""
+    # 速率限制检查
+    client_ip = request.client.host
+    if not rate_limiter.is_allowed(client_ip):
+        raise HTTPException(429, "上传请求过于频繁，请稍后再试")
+    
     if not files:
         raise HTTPException(status_code=400, detail="No files")
+    
+    # 验证上传文件
+    for file in files:
+        is_safe, error_msg = SecurityValidator.validate_upload_file(file)
+        if not is_safe:
+            raise HTTPException(status_code=400, detail=f"文件验证失败: {error_msg}")
+    
     results = []
     for uf in files:
         job_id = uuid.uuid4().hex
-        fname = _safe_filename(uf.filename or f"upload-{job_id}.zip")
-        dst = UPLOADS_DIR / fname    # ★ 用配置里的 UPLOADS_DIR
+        # 使用安全文件名生成
+        safe_filename = SecurityValidator.generate_safe_filename(uf.filename or f"upload-{job_id}.zip")
+        dst = UPLOADS_DIR / safe_filename
         content = await uf.read()
         dst.write_bytes(content)
-        JOBS[job_id] = {"status":"pending","done":0,"total":0,"current":"","file":fname,"message":""}
+        JOBS[job_id] = {"status":"pending","done":0,"total":0,"current":"","file":safe_filename,"message":""}
         background_tasks.add_task(_process_upload_job, job_id, dst)
-        results.append({"job_id": job_id, "filename": fname})
+        results.append({"job_id": job_id, "filename": safe_filename})
     return {"jobs": results}
 
 @app.get("/api/upload/status/{job_id}")
@@ -147,26 +174,32 @@ def api_upload_status(job_id: str):
 PREVIEW_CACHE_DIR = BASE_DIR / "data" / "cache" / "previews"
 PREVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+from .security import SecurityValidator, rate_limiter
+
 def _safe_join_under(root: Path, rel: str) -> Path:
-    p = (root / rel).resolve()
-    root = root.resolve()
-    if not str(p).startswith(str(root)):
-        raise HTTPException(status_code=400, detail="invalid path")
-    return p
+    """使用安全模块验证路径"""
+    return SecurityValidator.validate_file_path(rel, root)
 
 def _preview_cache_path(rel: str, max_side: int) -> Path:
     # 缓存也保留目录结构，最后统一存 jpg
     return (PREVIEW_CACHE_DIR / str(max_side) / rel).with_suffix(".jpg")
 
 @app.get("/preview/{max_side}/{rel_path:path}")
-def preview_image(max_side: int, rel_path: str):
+def preview_image(max_side: int, rel_path: str, request: Request):
     """
     动态缩放原图（最长边=max_side），磁盘缓存。
     使用方式：<img src="/preview/256/{{ item.rel_path }}">
     """
+    # 速率限制检查
+    client_ip = request.client.host
+    if not rate_limiter.is_allowed(client_ip):
+        raise HTTPException(429, "请求过于频繁，请稍后再试")
+    
+    # 参数验证
     if max_side <= 0 or max_side > 4000:
         raise HTTPException(400, "invalid max_side")
 
+    # 安全路径验证
     src = _safe_join_under(EXTRACTED_DIR, rel_path)
     if not src.exists() or not src.is_file():
         raise HTTPException(404, "file not found")
