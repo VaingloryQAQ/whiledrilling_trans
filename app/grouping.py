@@ -12,6 +12,7 @@ from .config import load_app_config
 CATS_ORDER = ["荧光扫描", "单偏光", "正交光", "三维指纹", "三维立体", "色谱", "轻烃谱图"]
 
 
+# ---------- 轻量对象 ----------
 @dataclass
 class ImgLite:
     id: int
@@ -32,13 +33,13 @@ class ImgLite:
         return f"{self.start:.2f}–{self.end:.2f} m"
 
 
+# ---------- 小工具 ----------
 def _center(img: Image) -> Optional[float]:
     if img.ndepth_center is not None:
         return float(img.ndepth_center)
     if img.start_depth is not None and img.end_depth is not None:
         return float((img.start_depth + img.end_depth) / 2.0)
     return None
-
 
 def _img_lite(img: Image) -> ImgLite:
     return ImgLite(
@@ -52,78 +53,101 @@ def _img_lite(img: Image) -> ImgLite:
         center=_center(img),
     )
 
-
-def _bucket(x: float, gran: float) -> float:
-    # 四舍五入到粒度
-    return round(x / gran) * gran
-
-
 def _valid_depth(img: ImgLite) -> bool:
     return img.start is not None and img.end is not None and img.center is not None and isfinite(img.center)
 
+def _overlap(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    lo = max(a[0], b[0]); hi = min(a[1], b[1]); return max(0.0, hi - lo)
 
-def _pick_default_well(sess: Session) -> Optional[str]:
-    # 选“图片最多”的井名作为默认
-    rows = sess.exec(select(Image.well_name)).all()
-    counts: Dict[str, int] = {}
-    for w in rows:
-        if not w:
-            continue
-        counts[w] = counts.get(w, 0) + 1
-    if not counts:
-        return None
-    return max(counts.items(), key=lambda kv: kv[1])[0]
+from .normalizer import Normalizer
+
+def canon_sample_type(s: Optional[str]) -> str:
+    return Normalizer.canon_sample_type_simple(s)
+
+def path_has_any(s: str, words: List[str]) -> bool:
+    if not s: return False
+    return any(w in s for w in words)
 
 
-def build_grouped_data(sess: Session, well: Optional[str]) -> Dict[str, Any]:
+# ---------- 主函数 ----------
+def build_grouped_data(
+    sess: Session,
+    well: Optional[str],
+    sample_type: Optional[str] = None,
+    from_depth: Optional[float] = None
+) -> Dict[str, Any]:
     """
-    生成“按荧光扫描锚定的深度段 + 各类匹配”的结构（单井）。
-    - 若未传 well，自动选“图片最多”的一口井；
-    - 匹配容差 = max(全局tol, 段宽/2)；若仍无匹配，回退到“离段中心最近”的一张（阈值 3*gran）。
+    生成“按荧光扫描锚定的分段 + 各类匹配”的结构。
+    - 锚：优先用荧光扫描，每张荧光图一个分段，直接取其 [start,end]（不规则锚也支持）；
+      若无荧光，则退回“粒度分桶”。
+    - 匹配池：只使用“看起来就是目标样品类型”的图片（正向匹配 + 黑词排除）；
+    - 匹配规则：段扩容 tol = max(全局 tol, 段宽/2)；重叠或中心接近即收；为空则取离段中心最近的一张（阈值 3*gran）。
     """
     cfg = load_app_config()
     gran = float(cfg["depth_group"]["granularity"])
     tol_global = float(cfg["depth_group"]["tolerance"])
 
-    # 1) 锁定井
+    # 1) 选井
     if not well:
-        well = _pick_default_well(sess)
+        # 选图片最多的井（兜底）
+        rows = sess.exec(select(Image.well_name)).all()
+        counts: Dict[str, int] = {}
+        for w in rows:
+            if w: counts[w] = counts.get(w, 0) + 1
+        well = max(counts.items(), key=lambda kv: kv[1])[0] if counts else None
 
-    q = select(Image).where(Image.well_name == well) if well else select(Image)
-    rows: List[Image] = sess.exec(q).all()
-    if not rows:
-        return {
-            "well": well or "",
-            "gran": gran,
-            "tolerance": tol_global,
-            "categories": CATS_ORDER,
-            "segments": [],
-            "imagesBySegment": {},
-        }
+    q_base = select(Image).where(Image.well_name == well) if well else select(Image)
+    rows_all: List[Image] = sess.exec(q_base).all()
+    if not rows_all:
+        return {"well": well or "", "gran": gran, "tolerance": tol_global,
+                "categories": CATS_ORDER, "segments": [], "imagesBySegment": {}}
 
-    # 2) 轻量化并过滤无深度的
-    items: List[ImgLite] = []
-    for r in rows:
+    # 2) 轻量化
+    all_items: List[ImgLite] = []
+    for r in rows_all:
         il = _img_lite(r)
         if _valid_depth(il):
-            items.append(il)
+            all_items.append(il)
 
-    # 3) 锚：优先荧光；无荧光则全体
-    fluo = [x for x in items if x.category == "荧光扫描"]
-    anchors_source = fluo if fluo else items
+    # 3) 锚：先取荧光
+    fluo = [x for x in all_items if x.category == "荧光扫描"]
+    anchors: List[ImgLite] = sorted(fluo, key=lambda x: x.center) if fluo else []
 
-    # 4) 分桶（按粒度）
-    buckets: Dict[float, List[ImgLite]] = {}
-    for a in anchors_source:
-        b = _bucket(a.center, gran)
-        buckets.setdefault(b, []).append(a)
+    # 4) 匹配池：正向样品类型判定 + 类别保护
+    st = canon_sample_type(sample_type)
+    demo_words = ["样例","示例","模板","标准图","谱库","效验","校验","标样","空白"]
 
-    # 5) 构建段 & 匹配
+    def looks_like_sample(img: ImgLite) -> bool:
+        if not st:
+            return True
+        p = img.rel_path
+        val = canon_sample_type(img.sample_type)
+        if st == "岩屑":
+            if (val == "岩屑") or path_has_any(p, ["岩屑","岩心","岩芯"]):
+                if not path_has_any(p, ["泥浆","钻井液"] + demo_words):
+                    return True
+            return False
+        if st == "泥浆":
+            return (val == "泥浆") or path_has_any(p, ["泥浆","钻井液"])
+        if st == "岩心":
+            if (val == "岩心") or path_has_any(p, ["岩心","岩芯"]):
+                return not path_has_any(p, ["泥浆","钻井液"])
+            return False
+        # 其它：简单包含，且排除演示词
+        return (val == st) or (st in (p or ""))
+
+    def category_guard(img: ImgLite) -> bool:
+        if img.category == "轻烃谱图":
+            # 屏蔽热解混入
+            if path_has_any(img.rel_path, ["热解","热解分析","热解谱图"]):
+                return False
+        return True
+
+    items_pool: List[ImgLite] = [x for x in all_items if looks_like_sample(x) and category_guard(x)]
+
+    # 5) 若无荧光，退回粒度分桶做锚
     segments: List[Dict[str, Any]] = []
     imagesBySegment: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
-
-    def overlap(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-        lo = max(a[0], b[0]); hi = min(a[1], b[1]); return max(0.0, hi - lo)
 
     def to_dict(img: ImgLite) -> Dict[str, Any]:
         return {
@@ -138,61 +162,99 @@ def build_grouped_data(sess: Session, well: Optional[str]) -> Dict[str, Any]:
             "depth_label": img.depth_label,
         }
 
-    for bucket_center in sorted(buckets.keys()):
-        anchor_list = sorted(buckets[bucket_center], key=lambda x: x.center)
-        seg_id = f"{(well or '-') }#{bucket_center:.2f}"
+    # A) 不规则锚：每张荧光即一个分段
+    if anchors:
+        # from_depth 过滤（按段中心）
+        if from_depth is not None:
+            anchors = [a for a in anchors if (a.center is not None and a.center >= from_depth)]
 
-        # 段区间：荧光存在 → 用该桶荧光的 [min(start), max(end)]；否则 bucket±gran/2
-        if fluo:
-            S = min(a.start for a in anchor_list if a.start is not None)
-            E = max(a.end for a in anchor_list if a.end is not None)
-        else:
-            S, E = bucket_center - gran / 2.0, bucket_center + gran / 2.0
+        for a in anchors:
+            seg_id = f"{(well or '-') }#{a.center:.2f}"
+            S, E = a.start or a.center, a.end or a.center
+            if S is None or E is None:  # 理论上不会发生（valid_depth）
+                continue
+            if S > E: S, E = E, S
+            tol = max(tol_global, (E - S) / 2.0)
+            seg_interval = (S - tol, E + tol)
+            bucket_center = a.center
 
-        seg_label = f"{S:.2f}–{E:.2f} m"
-        # 动态容差：段宽/2 与全局 tol 取大
-        tol_dyn = max(tol_global, (E - S) / 2.0)
+            # 匹配
+            cat_map: Dict[str, List[ImgLite]] = {c: [] for c in CATS_ORDER}
+            for it in items_pool:
+                if _overlap(seg_interval, (it.start, it.end)) > 0:
+                    cat_map[it.category].append(it)
+                elif it.center is not None and bucket_center is not None and abs(it.center - bucket_center) <= tol:
+                    cat_map[it.category].append(it)
 
-        # 先按“重叠/中心靠近”匹配；若为空，再做“最近回退”
-        cat_map: Dict[str, List[ImgLite]] = {c: [] for c in CATS_ORDER}
-        for it in items:
-            it_interval = (it.start, it.end)
-            seg_interval = (S - tol_dyn, E + tol_dyn)
+            # 回退：距离段中心最近（阈值 3*gran）
+            for cat in CATS_ORDER:
+                if not cat_map[cat]:
+                    cands = [x for x in items_pool if x.category == cat]
+                    if cands:
+                        best = min(cands, key=lambda x: abs((x.center or bucket_center) - bucket_center))
+                        if abs((best.center or bucket_center) - bucket_center) <= 3 * gran:
+                            cat_map[cat] = [best]
 
-            ok = False
-            if overlap(seg_interval, it_interval) > 0:
-                ok = True
-            elif abs((it.center or bucket_center) - bucket_center) <= tol_dyn:
-                ok = True
+            imagesBySegment[seg_id] = {}
+            for cat in CATS_ORDER:
+                lst = cat_map.get(cat, [])
+                lst_sorted = sorted(lst, key=lambda x: abs((x.center or bucket_center) - bucket_center))
+                imagesBySegment[seg_id][cat] = [to_dict(x) for x in lst_sorted]
 
-            if ok and it.category in cat_map:
-                cat_map[it.category].append(it)
+            segments.append({
+                "id": seg_id,
+                "label": f"{S:.2f}–{E:.2f} m",
+                "center": bucket_center,
+                "anchor_options": [to_dict(a)],  # 当前锚自身
+                "counters": {c: len(imagesBySegment[seg_id][c]) for c in CATS_ORDER}
+            })
 
-        # 回退：为空则取“距离段中心最近”的一张（阈值 3*gran）
-        for cat in CATS_ORDER:
-            if not cat_map[cat]:
-                candidates = [x for x in items if x.category == cat]
-                if candidates:
-                    best = min(candidates, key=lambda x: abs((x.center or bucket_center) - bucket_center))
-                    if abs((best.center or bucket_center) - bucket_center) <= 3 * gran:
-                        cat_map[cat] = [best]
+    # B) 无荧光：退回粒度分桶
+    else:
+        # 以全集为锚来源
+        buckets: Dict[float, List[ImgLite]] = {}
+        for it in all_items:
+            b = round((it.center or 0.0) / gran) * gran
+            buckets.setdefault(b, []).append(it)
 
-        # 序列化：按距段中心从近到远排序
-        imagesBySegment[seg_id] = {}
-        for cat in CATS_ORDER:
-            lst = cat_map.get(cat, [])
-            lst_sorted = sorted(lst, key=lambda x: abs((x.center or bucket_center) - bucket_center))
-            imagesBySegment[seg_id][cat] = [to_dict(x) for x in lst_sorted]
+        if from_depth is not None:
+            buckets = {c: lst for c, lst in buckets.items() if c >= from_depth}
 
-        anchors_payload = [to_dict(a) for a in anchor_list] if fluo else []
+        for c in sorted(buckets.keys()):
+            lst = sorted(buckets[c], key=lambda x: x.center or c)
+            S = min(a.start for a in lst if a.start is not None)
+            E = max(a.end for a in lst if a.end is not None)
+            seg_id = f"{(well or '-') }#{c:.2f}"
+            tol = max(tol_global, (E - S) / 2.0)
+            seg_interval = (S - tol, E + tol)
 
-        segments.append({
-            "id": seg_id,
-            "label": seg_label,
-            "center": bucket_center,
-            "anchor_options": anchors_payload,
-            "counters": {c: len(imagesBySegment[seg_id][c]) for c in CATS_ORDER}
-        })
+            cat_map: Dict[str, List[ImgLite]] = {ct: [] for ct in CATS_ORDER}
+            for it in items_pool:
+                if _overlap(seg_interval, (it.start, it.end)) > 0:
+                    cat_map[it.category].append(it)
+                elif it.center is not None and abs(it.center - c) <= tol:
+                    cat_map[it.category].append(it)
+
+            for cat in CATS_ORDER:
+                if not cat_map[cat]:
+                    cands = [x for x in items_pool if x.category == cat]
+                    if cands:
+                        best = min(cands, key=lambda x: abs((x.center or c) - c))
+                        if abs((best.center or c) - c) <= 3 * gran:
+                            cat_map[cat] = [best]
+
+            imagesBySegment[seg_id] = {}
+            for cat in CATS_ORDER:
+                lst2 = sorted(cat_map.get(cat, []), key=lambda x: abs((x.center or c) - c))
+                imagesBySegment[seg_id][cat] = [to_dict(x) for x in lst2]
+
+            segments.append({
+                "id": seg_id,
+                "label": f"{S:.2f}–{E:.2f} m",
+                "center": c,
+                "anchor_options": [],  # 没有荧光时不提供锚选项
+                "counters": {ct: len(imagesBySegment[seg_id][ct]) for ct in CATS_ORDER}
+            })
 
     return {
         "well": well or "",

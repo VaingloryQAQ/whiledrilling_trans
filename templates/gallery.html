@@ -1,26 +1,249 @@
 {% extends "base.html" %}
-{% block content %}<h1>画廊</h1>
+{% block content %}
+<h1>画廊</h1>
+
 <form method="get" class="filters card">
-<div><label>井名</label><input type="text" name="well" value="{{ filters.well }}"></div>
-<div><label>类别</label><select name="category"><option value="">全部</option>{% for c in cats %}
-<option value="{{ c }}" {% if c == filters.category %}selected{% endif %}>{{ c }}</option>{% endfor %}</select></div>
-<div><label>样品类型</label><select name="sample_type"><option value="">全部</option>{% for s in stypes %}
-<option value="{{ s }}" {% if s == filters.sample_type %}selected{% endif %}>{{ s }}</option>{% endfor %}</select></div>
-<div><label>深度范围</label>
-<input type="number" step="0.01" name="depth_min" placeholder="最小" value="{{ filters.depth_min }}">
-<input type="number" step="0.01" name="depth_max" placeholder="最大" value="{{ filters.depth_max }}"></div>
-<div><label>每页</label><input type="number" name="per_page" min="10" max="200" value="{{ filters.per_page }}"></div>
-<button type="submit">筛选</button><a class="btn-secondary" href="/gallery">重置</a>
-<span class="count">共 {{ filters.total_count }} 张</span></form>
-<div class="grid">{% for it in items %}<div class="card img-card">
-<a href="/files/{{ it.rel_path }}" target="_blank"><img src="/thumbs/{{ it.thumb_path or it.rel_path }}" alt="{{ it.rel_path }}" loading="lazy" /></a>
-<div class="meta"><div>井：{{ it.well_name or "—" }}</div><div>类：{{ it.category or "—" }}</div>
-<div>样：{{ it.sample_type or "—" }}</div>
-<div>深：{% if it.start_depth is not none and it.end_depth is not none %}{{ '%.2f'|format(it.start_depth) }}–{{ '%.2f'|format(it.end_depth) }} m{% else %}—{% endif %}</div>
-{% if it.anomalies %}<div class="anomaly">⚠ {{ it.anomalies }}</div>{% endif %}</div></div>{% endfor %}</div>
-<div class="pager">{% if filters.page|int > 1 %}
-<a href="?well={{filters.well}}&category={{filters.category}}&sample_type={{filters.sample_type}}&depth_min={{filters.depth_min}}&depth_max={{filters.depth_max}}&per_page={{filters.per_page}}&page={{filters.page|int - 1}}">上一页</a>{% endif %}
-<span>第 {{ filters.page }} 页</span>
-{% if (filters.page|int * filters.per_page|int) < filters.total_count %}
-<a href="?well={{filters.well}}&category={{filters.category}}&sample_type={{filters.sample_type}}&depth_min={{filters.depth_min}}&depth_max={{filters.depth_max}}&per_page={{filters.per_page}}&page={{filters.page|int + 1}}">下一页</a>{% endif %}
-</div>{% endblock %}
+  <div>
+    <label>井名</label>
+    <input type="text" name="well" value="{{ filters.well }}">
+  </div>
+
+  <div>
+    <label>类别</label>
+    <select name="category">
+      <option value="">全部</option>
+      {% for c in cats %}
+        <option value="{{ c }}" {% if c == filters.category %}selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div>
+    <label>样品类型</label>
+    <select name="sample_type">
+      <option value="">全部</option>
+      {% for s in stypes %}
+        <option value="{{ s }}" {% if s == filters.sample_type %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div>
+    <label>深度范围</label>
+    <input type="number" step="0.01" name="depth_min" placeholder="最小" value="{{ filters.depth_min }}">
+    <input type="number" step="0.01" name="depth_max" placeholder="最大" value="{{ filters.depth_max }}">
+  </div>
+
+  <div>
+    <label>每页</label>
+    <input type="number" name="per_page" min="10" max="200" value="{{ filters.per_page }}">
+  </div>
+
+  <button type="submit">筛选</button>
+  <a class="btn-secondary" href="/gallery">重置</a>
+  <span class="count">共 {{ filters.total_count }} 张</span>
+</form>
+
+<!-- 图片网格 -->
+<div class="grid">
+  {% for it in items %}
+  <div class="grid-card">
+    <a href="/files/{{ it.rel_path }}" target="_blank" title="{{ it.raw_name }}">
+      <div class="grid-img-wrap">
+        <!-- 按需缩放预览：/preview/256/{rel_path} -->
+        <img src="/preview/256/{{ it.rel_path }}" alt="" class="grid-img" loading="lazy" decoding="async">
+      </div>
+    </a>
+    <div class="grid-meta">
+      井：{{ it.well_name or "—" }}<br>
+      类：{{ it.category or "—" }}<br>
+      样：{{ it.sample_type or "—" }}<br>
+      深：
+      {% if it.start_depth is not none and it.end_depth is not none %}
+        {{ '%.2f'|format(it.start_depth) }}–{{ '%.2f'|format(it.end_depth) }} m
+      {% else %}—{% endif %}
+      {% if it.anomalies %}
+        <div class="anomaly">⚠ {{ it.anomalies }}</div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- 分页：参数做 urlencode，避免中文/空值问题 -->
+{% set qwell = (filters.well or '')|urlencode %}
+{% set qcat  = (filters.category or '')|urlencode %}
+{% set qstype= (filters.sample_type or '')|urlencode %}
+{% set qdmin = (filters.depth_min or '')|string|urlencode %}
+{% set qdmax = (filters.depth_max or '')|string|urlencode %}
+{% set qpp   = filters.per_page %}
+{% set qpage = filters.page %}
+
+<div class="pager">
+  {% if qpage|int > 1 %}
+    <a href="?well={{qwell}}&category={{qcat}}&sample_type={{qstype}}&depth_min={{qdmin}}&depth_max={{qdmax}}&per_page={{qpp}}&page={{qpage|int - 1}}">上一页</a>
+  {% endif %}
+
+  <span>第 {{ filters.page }} 页</span>
+
+  {% if (filters.page|int * filters.per_page|int) < filters.total_count %}
+    <a href="?well={{qwell}}&category={{qcat}}&sample_type={{qstype}}&depth_min={{qdmin}}&depth_max={{qdmax}}&per_page={{qpp}}&page={{qpage|int + 1}}">下一页</a>
+  {% endif %}
+</div>
+
+<!-- 弹窗（井号候选） —— 与分组页一致 -->
+<div id="wellPicker" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-msg">匹配到多口井，请选择：</div>
+    <div id="wellList" class="well-list"></div>
+    <div class="modal-actions">
+      <button id="wellCancel" class="btn secondary">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 仅本页用到的样式，想放到全局 css 也行 -->
+<style>
+  .grid{
+    display:grid;
+    grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+    gap:16px;
+    align-items:start;
+  }
+  .grid-card{
+    border:1px solid #2a3650;
+    border-radius:10px;
+    padding:10px;
+    background:#121826;
+  }
+  .grid-img-wrap{
+    width:248px; height:248px;
+    display:flex; align-items:center; justify-content:center;
+    background:#0f1420; border-radius:8px; overflow:hidden;
+    margin:0 auto;
+  }
+  .grid-img{ max-width:100%; max-height:100%; object-fit:contain; }
+  .grid-meta{ margin-top:8px; font-size:12px; color:#a8b6e8; line-height:1.4; }
+  .anomaly{ margin-top:4px; color:#ffb84d; }
+  .filters.card{ display:flex; flex-wrap:wrap; gap:12px; align-items:end; margin-bottom:16px; }
+  .filters.card > div{ display:flex; flex-direction:column; gap:4px; }
+  .pager{ display:flex; gap:12px; align-items:center; justify-content:center; margin:16px 0; }
+
+  /* 弹窗（与分组页共用风格变量） */
+  .modal{position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; z-index:3000;}
+  .modal.hidden{display:none;}
+  .modal-card{background:#1f2633; border:1px solid #2a3650; border-radius:12px; padding:18px; width:420px;}
+  .modal-msg{white-space:pre-line; margin-bottom:12px; color:#dbe2f7;}
+  .modal-actions{display:flex; gap:8px; justify-content:flex-end;}
+  .btn{padding:6px 12px; border-radius:8px; background:#2f6fed; color:#fff; border:0; cursor:pointer;}
+  .btn.secondary{background:#2a3650; color:#dbe2f7;}
+
+  /* 井号候选列表（与分组页一致） */
+  .well-list{display:flex; flex-direction:column; gap:8px; margin:8px 0 12px;}
+  .well-item{padding:8px 10px; border-radius:8px; border:1px solid #2a3650; background:#0f1420; color:#dbe2f7; cursor:pointer; text-align:left;}
+  .well-item:hover{border-color:#4a6cf3;}
+</style>
+
+<script>
+(function(){
+  const form = document.querySelector('form.filters');
+  if (!form) return;
+
+  // 弹窗元素与 grouped 页统一
+  const wellPicker = document.getElementById('wellPicker');
+  const wellList   = document.getElementById('wellList');
+  const wellCancel = document.getElementById('wellCancel');
+
+  function showWellPicker(candidates, onPick){
+    wellList.innerHTML = '';
+    candidates.forEach(w=>{
+      const btn = document.createElement('button');
+      btn.className = 'well-item';
+      btn.type = 'button';
+      btn.textContent = w;
+      btn.addEventListener('click', ()=>{
+        hideWellPicker();
+        onPick && onPick(w);
+      });
+      wellList.appendChild(btn);
+    });
+    wellPicker.classList.remove('hidden');
+  }
+  function hideWellPicker(){
+    wellPicker.classList.add('hidden');
+  }
+  wellCancel?.addEventListener('click', hideWellPicker);
+
+  // 提交前：解析井号；多候选弹窗选择
+  form.addEventListener('submit', async (e)=>{
+    const wellInput = form.querySelector('input[name="well"]');
+    const raw = (wellInput?.value || '').trim();
+    if (!raw) return; // 没填井名直接正常提交
+
+    e.preventDefault(); // 先消歧
+    try {
+      const r = await fetch('/api/wells?q=' + encodeURIComponent(raw));
+      const data = await r.json();
+
+      if (!data.candidates || data.candidates.length === 0) {
+        alert('没有匹配到井号'); return;
+      }
+      // 唯一候选：用 resolved 覆盖后提交
+      if (data.resolved && data.candidates.length === 1) {
+        wellInput.value = data.resolved;
+        form.submit();
+        return;
+      }
+      // 多候选：弹窗选择，回填后提交
+      showWellPicker(data.candidates, (picked)=>{
+        wellInput.value = picked;
+        form.submit();
+      });
+    } catch (err) {
+      // 解析失败就退化为原始提交
+      console.error(err);
+      form.submit();
+    }
+  });
+})();
+</script>
+<!-- 大图预览 -->
+<div id="zoomModal" class="zoom hidden" tabindex="-1" aria-hidden="true" style="display:none">
+  <div class="zoom-backdrop"></div>
+  <div class="zoom-box">
+    <img id="zoomImg" alt="预览">
+    <button id="zoomClose" class="zoom-close" title="关闭">×</button>
+  </div>
+</div>
+<style>
+  .zoom{position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:4000;}
+  .zoom.hidden{display:none;}
+  .zoom-backdrop{position:absolute; inset:0; background:rgba(0,0,0,.72);}
+  .zoom-box{position:relative; z-index:2; max-width:92vw; max-height:92vh; display:flex; align-items:center; justify-content:center;}
+  #zoomImg{max-width:92vw; max-height:92vh; object-fit:contain; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.5);}
+  .zoom-close{position:absolute; top:-10px; right:-10px; width:36px; height:36px; border-radius:50%; border:1px solid #2a3650; background:#1b2335; color:#fff; font-size:20px; cursor:pointer;}
+</style>
+<script>
+(function(){
+  const zoom = document.getElementById('zoomModal');
+  const zoomImg = document.getElementById('zoomImg');
+  const zoomClose = document.getElementById('zoomClose');
+
+  document.addEventListener('click', (e)=>{
+    const a = e.target.closest('.grid-card a');
+    if (!a) return;
+    e.preventDefault();
+    const rel = a.getAttribute('href').replace(/^\/files\//,'');
+    const enc = rel.split('/').map(encodeURIComponent).join('/');
+    zoomImg.src = '/preview/1200/' + enc;
+    zoom.classList.remove('hidden'); zoom.style.display='flex';
+    zoom.focus();
+  });
+  function hide(){ zoom.classList.add('hidden'); zoom.style.display='none'; zoomImg.src=''; }
+  zoomClose.addEventListener('click', hide);
+  zoom.addEventListener('click', (e)=>{ if (e.target===zoom || e.target.classList.contains('zoom-backdrop')) hide(); });
+  document.addEventListener('keydown', (e)=>{ if (!zoom.classList.contains('hidden') && e.key==='Escape') hide(); });
+})();
+</script>
+
+{% endblock %}

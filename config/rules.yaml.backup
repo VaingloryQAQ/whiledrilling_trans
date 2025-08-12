@@ -18,22 +18,18 @@ categories:
   require_all:
   - 薄片鉴定
   - 正交光
-- image_tokens_any:
-  - 指纹图
-  - 等值图
-  mode: file
+- mode: file
   name: 三维指纹
   priority: 70
   require_all:
   - 三维谱图
-- image_tokens_any:
-  - 立体图
-  - 三维图
-  mode: file
+  - 指纹图
+- mode: file
   name: 三维立体
   priority: 70
   require_all:
   - 三维谱图
+  - 立体图
 - mode: file
   name: 轻烃谱图
   priority: 65

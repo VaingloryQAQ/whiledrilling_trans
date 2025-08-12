@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section style="margin:16px 0; padding:16px; border:1px solid #2a3650; border-radius:12px;">
+  <h2 style="margin:0 0 12px 0;">批量上传压缩包</h2>
+  <form id="uploadForm" onsubmit="return false;" enctype="multipart/form-data">
+    <input id="fileInput" type="file" name="files" multiple />
+    <button id="btnUpload" type="button" class="btn">上传</button>
+  </form>
+  <div id="jobs" style="margin-top:12px;"></div>
+</section>
+
+<script>
+(function(){
+  const jobsEl = document.getElementById('jobs');
+  const input  = document.getElementById('fileInput');
+  const btn    = document.getElementById('btnUpload');
+
+  btn.addEventListener('click', async ()=>{
+    if (!input.files || input.files.length === 0) { alert('请先选择文件'); return; }
+    btn.disabled = true;
+
+    const fd = new FormData();
+    for (const f of input.files) fd.append('files', f);
+    let resp;
+    try { resp = await fetch('/api/upload', { method:'POST', body: fd }); }
+    catch(e){ alert('上传失败：网络异常'); btn.disabled = false; return; }
+    if (!resp.ok){ alert('上传失败：' + await resp.text()); btn.disabled = false; return; }
+    const data = await resp.json();
+
+    data.jobs.forEach(j => addJobRow(j.job_id, j.filename));
+    input.value = ''; btn.disabled = false;
+  });
+
+  function addJobRow(jobId, filename){
+    const row = document.createElement('div');
+    row.className = 'job-row';
+    row.innerHTML = `
+      <div class="job-name" title="${filename}">${filename}</div>
+      <div class="job-bar"><div class="job-fill" style="width:0%"></div></div>
+      <div class="job-pct">0%</div>
+      <div class="job-status">排队中</div>`;
+    jobsEl.prepend(row);
+    poll(jobId, row);
+  }
+
+  async function poll(jobId, row){
+    const bar = row.querySelector('.job-fill');
+    const pct = row.querySelector('.job-pct');
+    const st  = row.querySelector('.job-status');
+
+    while (true) {
+      let r; try { r = await fetch(`/api/upload/status/${jobId}`, { cache:'no-store' }); }
+      catch(e){ st.textContent='进度查询失败'; break; }
+      if (!r.ok){ st.textContent='进度查询失败'; break; }
+      const j = await r.json();
+      bar.style.width = (j.percent||0) + '%';
+      pct.textContent = (j.percent||0) + '%';
+      st.textContent = statusText(j);
+
+      if (j.status === 'done'){ row.classList.add('ok'); break; }
+      if (j.status === 'error'){ row.classList.add('err'); st.title = j.message || ''; break; }
+      await new Promise(rs => setTimeout(rs, 500));
+    }
+  }
+
+  function statusText(j){
+    switch (j.status) {
+      case 'pending':       return '排队中…';
+      case 'extracting':    return '解压中… ' + (j.current || '');
+      case 'ingesting':     return '入库中…';
+      case 'recalculating': return '重算分类中…';
+      case 'done':          return '完成';
+      case 'error':         return '失败';
+      default:              return j.status || '';
+    }
+  }
+})();
+</script>
+
+<style>
+.job-row{
+  display:grid; grid-template-columns: 1fr 320px 64px 1fr;
+  align-items:center; gap:10px; padding:10px 0; border-top:1px dashed #2a3650;
+}
+.job-row:first-child{ border-top:0; }
+.job-name{ overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.job-bar{ height:10px; background:#0f1420; border:1px solid #2a3650; border-radius:6px; overflow:hidden; }
+.job-fill{ height:100%; background:#2f6fed; }
+.job-pct{ text-align:right; width:64px; }
+.job-status{ color:#a8b6e8; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.job-row.ok  .job-fill{ background:#3bb273; }
+.job-row.err .job-fill{ background:#d84e53; }
+</style>
+
+{% endblock %}

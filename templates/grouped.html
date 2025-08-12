@@ -1,228 +1,722 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="container">
+  <div class="topbar">
+    <div class="title">
+      <span>分组视图</span>
+      <small id="wellBadge"></small>
+    </div>
 
-  <h2 style="margin: 16px 0;">分组视图（深度行 × 类别列）</h2>
+    <div class="toolbar">
+      <div class="field">
+        <label>井名</label>
+        <input id="wellInput" type="text" value="{{ well }}" placeholder="例如：BZ8-3S-11">
+        <button id="btnQuery" class="btn">查询</button>
+      </div>
 
-  <div class="card" style="padding: 16px;">
-    <div style="display:flex; gap: 12px; align-items: center; flex-wrap: wrap;">
-      <label>井名（可模糊）</label>
-      <input id="wellInput" type="text" value="{{ well }}" placeholder="例如：BZ8-3S-11" />
-      <button id="btnQuery" class="btn">查询</button>
+      <div class="field">
+        <label>样品类型</label>
+        <select id="sampleType"></select>
+      </div>
 
-      <label style="margin-left: 24px;">
-        <input type="checkbox" id="seqToggle" />
-        顺序约束（后一行深度 > 前一行）
-      </label>
+      <div class="field">
+        <label>从深度开始</label>
+        <input id="startDepth" type="number" step="0.01" placeholder="例如 3650">
+        <button id="btnPreset" class="btn secondary">预排当前页</button>
+      </div>
+
+      <div class="field">
+        <label>每页行数</label>
+        <input id="rowsPerPage" type="number" min="1" value="10" style="width:80px">
+      </div>
+
+      <div class="field" style="position:relative">
+        <button id="btnCols" class="btn secondary">列显示/隐藏</button>
+        <div id="colsPanel" class="popover hidden"></div>
+      </div>
+
+      <div class="field">
+        <label class="lock-label"><input type="checkbox" id="rowSeqLock" checked> 行顺序锁（荧光段递增）</label>
+      </div>
     </div>
   </div>
 
-  <div id="tableContainer" style="margin-top: 16px;"></div>
+  <div class="pager">
+    <button id="prevPage" class="btn secondary">上一页</button>
+    <span id="pageInfo">第 1 / 1 页</span>
+    <button id="nextPage" class="btn secondary">下一页</button>
+  </div>
+
+  <div id="tableWrapper" class="table-wrapper">
+    <div id="table" class="grid"></div>
+  </div>
+</div>
+
+<!-- 锁提示（仅靠 .hidden 控制显隐） -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <div id="modalMsg" class="modal-msg"></div>
+    <div class="modal-actions">
+      <button id="modalFix" class="btn">自动调整</button>
+      <button id="modalOnce" class="btn secondary">忽略一次</button>
+      <button id="modalUnlock" class="btn danger">关闭该锁</button>
+    </div>
+  </div>
+</div>
+
+<!-- 井号候选（仅靠 .hidden 控制显隐） -->
+<div id="wellPicker" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-msg">匹配到多口井，请选择：</div>
+    <div id="wellList" class="well-list"></div>
+    <div class="modal-actions">
+      <button id="wellCancel" class="btn secondary">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 大图预览（Lightbox） -->
+<div id="zoomModal" class="zoom hidden" tabindex="-1" aria-hidden="true">
+  <div class="zoom-backdrop"></div>
+  <div class="zoom-box">
+    <img id="zoomImg" alt="预览">
+    <button id="zoomClose" class="zoom-close" title="关闭">×</button>
+  </div>
+</div>
+
+<!-- 加载中遮罩 -->
+<div id="loading" class="loading hidden">
+  <div class="spinner"></div>
+  <div class="loading-text">正在加载数据…</div>
 </div>
 
 <script>
-// 简易工具
-function el(tag, attrs={}, children=[]) {
+/* ===================== 小工具 ===================== */
+function el(tag, attrs={}, kids=[]) {
   const e = document.createElement(tag);
   for (const [k,v] of Object.entries(attrs)) {
     if (k === 'class') e.className = v;
     else if (k === 'html') e.innerHTML = v;
     else e.setAttribute(k, v);
   }
-  if (!Array.isArray(children)) children = [children];
-  children.filter(Boolean).forEach(c => e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+  (Array.isArray(kids) ? kids : [kids]).forEach(c => e.appendChild(typeof c === "string" ? document.createTextNode(c) : c));
   return e;
 }
+const fmtDepth = (s,e)=> (s==null||e==null) ? "—" : (Math.abs(s-e)<1e-6 ? `${s.toFixed(2)} m` : `${s.toFixed(2)}–${e.toFixed(2)} m`);
 
-const state = { data: null, selection: {}, seqEnforced: false };
+function showLoading(on) {
+  document.getElementById('loading').classList.toggle('hidden', !on);
+}
+function toast(msg){ alert(msg); }
 
+// 预览图 URL（走 /preview/{max}/{rel_path}）
+function getRelPath(obj) {
+  if (!obj) return '';
+  if (obj.rel_path) return obj.rel_path;
+  if (obj.file_url && obj.file_url.startsWith('/files/')) {
+    const raw = obj.file_url.slice('/files/'.length);
+    try { return decodeURIComponent(raw); } catch { return raw; }
+  }
+  return '';
+}
+function previewUrl(obj, maxSide) {
+  const rel = getRelPath(obj);
+  const enc = rel.split('/').map(encodeURIComponent).join('/');
+  return `/preview/${maxSide}/${enc}`;
+}
+
+/* ===================== 全局状态 ===================== */
+const state = {
+  data: null,
+  visibleCats: new Set(),
+  colLocks: {},
+  rowSegIdx: [],
+  cellSel: {},
+  page: 1,
+  pageSize: 10,
+  modal: { resolver: null, context: null },
+  catsAll: ["荧光扫描","单偏光","正交光","三维指纹","三维立体","色谱","轻烃谱图"],
+};
+
+/* ===================== 先“解析井号”再加载数据 ===================== */
+async function resolveWellAndLoad(){
+  const input = document.getElementById('wellInput').value.trim();
+  if (!input) { toast('请先输入井名'); return; }
+
+  showLoading(true);
+  try {
+    const res = await fetch('/api/wells?q=' + encodeURIComponent(input));
+    const data = await res.json();
+    showLoading(false);
+
+    const cands = Array.isArray(data.candidates) ? data.candidates : [];
+    if (cands.length === 0) {
+      toast('没有匹配到井号'); return;
+    }
+
+    // 只有“唯一候选且与输入精确（忽略空格/大小写）一致”时，直接加载；其他情况一律弹窗
+    const eq = (a,b)=> a.replace(/\s+/g,'').toLowerCase() === b.replace(/\s+/g,'').toLowerCase();
+    const exactOne = (cands.length === 1) && data.resolved && eq(cands[0], input);
+
+    if (exactOne) {
+      document.getElementById('wellInput').value = data.resolved;
+      await populateSampleTypes(data.resolved);  // ← 新增
+      await loadData();
+      return;
+    }
+    showWellPicker(cands);
+
+  } catch (e) {
+    showLoading(false);
+    console.error(e);
+    toast('井号解析失败');
+  }
+}
+
+async function populateSampleTypes(well) {
+  const sel = document.getElementById('sampleType');
+  const keep = sel.value; // 记住当前选择，便于刷新后保持
+  sel.innerHTML = '';     // 清空
+
+  // 先放“全部”
+  const optAll = document.createElement('option');
+  optAll.value = '';
+  optAll.textContent = '全部';
+  sel.appendChild(optAll);
+
+  try {
+    const url = new URL('/api/sample-types', window.location.origin);
+    if (well) url.searchParams.set('well', well);
+    const res = await fetch(url.toString());
+    const data = await res.json();
+    const types = Array.isArray(data.sample_types) ? data.sample_types : [];
+
+    types.forEach(t => {
+      const op = document.createElement('option');
+      op.value = t;
+      op.textContent = t;
+      sel.appendChild(op);
+    });
+
+    // 恢复之前的选择（若还存在）；否则默认“全部”
+    if ([...sel.options].some(o => o.value === keep)) {
+      sel.value = keep;
+    } else {
+      sel.value = '';
+    }
+  } catch (e) {
+    console.error('加载样品类型失败', e);
+    // 失败也至少保证有“全部”
+    sel.value = '';
+  }
+}
+
+function showWellPicker(list) {
+  const modal = document.getElementById('wellPicker');
+  const cont  = document.getElementById('wellList');
+  cont.innerHTML = '';
+  list.forEach(w=>{
+    const item = el('button',{class:'well-item'}, w);
+    item.addEventListener('click', async ()=>{
+      document.getElementById('wellInput').value = w;
+      hideWellPicker();
+      showLoading(true);
+      await populateSampleTypes(w);
+      await loadData();
+      showLoading(false);
+    });
+    cont.appendChild(item);
+  });
+  modal.classList.remove('hidden');      // 统一用类控制
+}
+function hideWellPicker(){
+  document.getElementById('wellPicker').classList.add('hidden');
+}
+document.getElementById('wellCancel').addEventListener('click', hideWellPicker);
+
+/* ===================== 数据加载 ===================== */
 async function loadData() {
   const well = document.getElementById('wellInput').value.trim();
+  const st   = document.getElementById('sampleType').value.trim();
   const url = new URL('/api/grouped-data', window.location.origin);
   if (well) url.searchParams.set('well', well);
+  if (st)   url.searchParams.set('sample_type', st);
+
+  showLoading(true);
   const res = await fetch(url.toString());
   const data = await res.json();
+  showLoading(false);
+
   state.data = data;
+  document.getElementById('wellBadge').textContent = data.well ? `（${data.well}）` : '';
 
-  // NEW: 用后端返回的井名回填输入框，避免只是占位符
-  if (data.well) document.getElementById('wellInput').value = data.well;
+  state.visibleCats = new Set(state.catsAll);
+  state.colLocks = {};
+  state.catsAll.forEach(c => state.colLocks[c] = false);
 
+  state.page = 1;
+  state.pageSize = parseInt(document.getElementById('rowsPerPage').value || '10', 10);
+
+  const n = Math.min(state.pageSize, data.segments.length);
+  state.rowSegIdx = Array.from({length: n}, (_,i)=> i);
+  state.cellSel = {};
+
+  buildColsPanel();
+  render();
+}
+
+/* ===================== 列显示/隐藏面板 ===================== */
+function buildColsPanel() {
+  const pan = document.getElementById('colsPanel');
+  pan.innerHTML = "";
+  pan.appendChild(el('div',{class:'popover-title'},'显示的列（荧光列始终显示）'));
+
+  const wrap = el('div',{class:'cols-wrap'});
+  state.catsAll.filter(c=>c!=="荧光扫描").forEach(cat => {
+    const id = 'col_'+cat;
+    const chk = el('input',{type:'checkbox', id, checked: state.visibleCats.has(cat)});
+    chk.addEventListener('change', ()=>{
+      if (chk.checked) state.visibleCats.add(cat); else state.visibleCats.delete(cat);
+      renderTable();
+    });
+    const lab = el('label',{for:id},cat);
+    wrap.appendChild(el('div',{class:'col-item'},[chk, lab]));
+  });
+  pan.appendChild(wrap);
+}
+document.getElementById('btnCols').addEventListener('click', ()=>{
+  document.getElementById('colsPanel').classList.toggle('hidden');
+});
+document.addEventListener('click', (e)=>{
+  const btn = document.getElementById('btnCols');
+  const pan = document.getElementById('colsPanel');
+  if (!btn.contains(e.target) && !pan.contains(e.target)) pan.classList.add('hidden');
+});
+
+/* ===================== 渲染入口 ===================== */
+function render() {
+  updatePager();
   renderTable();
 }
 
-function renderTable() {
-  const ctn = document.getElementById('tableContainer');
-  ctn.innerHTML = '';
-
-  const d = state.data;
-  if (!d || !d.segments || d.segments.length === 0) {
-    ctn.appendChild(el('div', {class:'card', html:'没有数据，换个井名试试。'}));
-    return;
-  }
-
-  // 表头
-  const headRow = el('div', {class:'grid-row'});
-  headRow.appendChild(el('div', {class:'grid-cell head'}, '井名'));
-  headRow.appendChild(el('div', {class:'grid-cell head'}, '深度（选择锚）'));
-  d.categories.forEach(cat => headRow.appendChild(el('div', {class:'grid-cell head'}, cat)));
-  ctn.appendChild(headRow);
-
-  d.segments.forEach((seg, i) => {
-    const row = el('div', {class:'grid-row', 'data-row': i});
-
-    // 井名（NEW：显示后端返回的单井名）
-    row.appendChild(el('div', {class:'grid-cell'}, d.well || '—'));
-
-    // 深度段选择 + 荧光锚选择
-    const depthCell = el('div', {class:'grid-cell'});
-    const segSel = el('select', {class:'select', style:'min-width: 220px;'});
-    d.segments.forEach((s, idx) => {
-      const op = el('option', {value: s.id}, `${s.label}`);
-      if (idx === i) op.selected = true;
-      segSel.appendChild(op);
-    });
-    depthCell.appendChild(segSel);
-
-    const anchorsWrap = el('span', {style:'margin-left:8px;'});
-    const anchorSel = el('select', {class:'select', style:'min-width: 160px;'});
-    anchorSel.appendChild(el('option', {value:''}, '无荧光锚'));
-    seg.anchor_options.forEach((a, j) => {
-      const lab = a.depth_label || (a.center != null ? a.center.toFixed(2)+' m' : `#${j+1}`);
-      anchorSel.appendChild(el('option', {value: a.center ?? ''}, `荧光 ${lab}`));
-    });
-    if (seg.anchor_options.length > 0) anchorSel.selectedIndex = 1;
-    anchorsWrap.appendChild(anchorSel);
-    depthCell.appendChild(anchorsWrap);
-    row.appendChild(depthCell);
-
-    const cellWraps = {};
-    d.categories.forEach(cat => {
-      const cell = el('div', {class:'grid-cell'});
-      const box = el('div', {class:'thumb-box'});
-      cell.appendChild(box);
-      row.appendChild(cell);
-      cellWraps[cat] = box;
-    });
-
-    ctn.appendChild(row);
-
-    state.selection[i] = { segId: d.segments[i].id, anchorCenter: seg.anchor_options[0]?.center ?? null };
-
-    function renderCellsForRow() {
-      const sel = state.selection[i];
-      const segId = sel.segId;
-      const anchorCenter = sel.anchorCenter;
-
-      const packs = d.imagesBySegment[segId];
-
-      d.categories.forEach(cat => {
-        const cell = cellWraps[cat];
-        cell.innerHTML = '';
-
-        const list = packs[cat] || [];
-        if (list.length === 0) {
-          cell.appendChild(el('div', {class:'thumb noimg'}, '—'));
-          return;
-        }
-
-        let idxBest = 0;
-        if (anchorCenter != null) {
-          let best = 1e18;
-          list.forEach((it, k) => {
-            const diff = (it.center != null) ? Math.abs(it.center - anchorCenter) : 1e9;
-            if (diff < best) { best = diff; idxBest = k; }
-          });
-        }
-        const it = list[idxBest];
-
-        const fig = el('div', {class:'thumb'});
-        const im = el('img', {src: it.thumb_url || it.file_url, alt: cat});
-        const cap = el('div', {class:'caption'}, it.depth_label || '—');
-        fig.appendChild(im); fig.appendChild(cap);
-
-        if (list.length > 1) fig.appendChild(el('div', {class:'badge'}, `×${list.length}`));
-        fig.addEventListener('click', () => window.open(it.file_url, '_blank'));
-        cell.appendChild(fig);
-      });
-    }
-
-    renderCellsForRow();
-
-    segSel.addEventListener('change', () => {
-      state.selection[i].segId = segSel.value;
-      const curSeg = d.segments.find(s => s.id === segSel.value);
-      anchorSel.innerHTML = '';
-      anchorSel.appendChild(el('option', {value:''}, '无荧光锚'));
-      (curSeg.anchor_options || []).forEach((a, j) => {
-        const lab = a.depth_label || (a.center != null ? a.center.toFixed(2)+' m' : `#${j+1}`);
-        anchorSel.appendChild(el('option', {value: a.center ?? ''}, `荧光 ${lab}`));
-      });
-      anchorSel.selectedIndex = (curSeg.anchor_options && curSeg.anchor_options.length) ? 1 : 0;
-      state.selection[i].anchorCenter = (curSeg.anchor_options && curSeg.anchor_options.length) ? curSeg.anchor_options[0].center : null;
-
-      enforceSeqFrom(i - 1);
-      renderCellsForRow();
-    });
-
-    anchorSel.addEventListener('change', () => {
-      const v = anchorSel.value;
-      state.selection[i].anchorCenter = (v === '' ? null : parseFloat(v));
-      renderCellsForRow();
-    });
-  });
-
-  enforceSeqFrom(-1);
+/* ===================== 分页 ===================== */
+function updatePager() {
+  const totalRows = state.data ? state.data.segments.length : 0;
+  const totalPages = Math.max(1, Math.ceil(totalRows / state.pageSize));
+  state.page = Math.min(state.page, totalPages);
+  document.getElementById('pageInfo').textContent = `第 ${state.page} / ${totalPages} 页`;
+  document.getElementById('prevPage').disabled = state.page<=1;
+  document.getElementById('nextPage').disabled = state.page>=totalPages;
 }
-
-function enforceSeqFrom(startRow) {
-  const enforce = state.seqEnforced;
-  const d = state.data; if (!d) return;
-
-  const centerMap = {}; d.segments.forEach(s => centerMap[s.id] = s.center);
-  const segSelectors = [...document.querySelectorAll('.grid-row select.select')].filter((_, idx) => idx % 2 === 0);
-
-  let prevCenter = null;
-  for (let i = 0; i < segSelectors.length; i++) {
-    const segSel = segSelectors[i];
-    for (const op of segSel.options) op.disabled = false;
-
-    if (enforce && prevCenter != null) {
-      for (const op of segSel.options) {
-        const c = centerMap[op.value];
-        if (c <= prevCenter) op.disabled = true;
-      }
-      if (segSel.selectedOptions.length && segSel.selectedOptions[0].disabled) {
-        const ok = [...segSel.options].find(o => !o.disabled);
-        if (ok) { segSel.value = ok.value; segSel.dispatchEvent(new Event('change')); }
-      }
-    }
-    prevCenter = centerMap[segSel.value];
-  }
-}
-
-document.getElementById('btnQuery').addEventListener('click', loadData);
-document.getElementById('seqToggle').addEventListener('change', (e) => {
-  state.seqEnforced = e.target.checked; enforceSeqFrom(-1);
+document.getElementById('prevPage').addEventListener('click', ()=>{
+  if (state.page<=1) return;
+  state.page--;
+  const start = (state.page-1)*state.pageSize;
+  const n = Math.min(state.pageSize, state.data.segments.length - start);
+  state.rowSegIdx = Array.from({length:n}, (_,i)=> start+i);
+  state.cellSel = {};
+  render();
+});
+document.getElementById('nextPage').addEventListener('click', ()=>{
+  const totalRows = state.data.segments.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows/state.pageSize));
+  if (state.page>=totalPages) return;
+  state.page++;
+  const start = (state.page-1)*state.pageSize;
+  const n = Math.min(state.pageSize, totalRows - start);
+  state.rowSegIdx = Array.from({length:n}, (_,i)=> start+i);
+  state.cellSel = {};
+  render();
+});
+document.getElementById('rowsPerPage').addEventListener('change', ()=>{
+  const v = parseInt(document.getElementById('rowsPerPage').value||'10',10);
+  state.pageSize = Math.max(1, v);
+  state.page = 1;
+  const n = Math.min(state.pageSize, state.data.segments.length);
+  state.rowSegIdx = Array.from({length:n}, (_,i)=> i);
+  state.cellSel = {};
+  render();
 });
 
-loadData();
+/* ===================== 预排：从某深度开始 ===================== */
+document.getElementById('btnPreset').addEventListener('click', ()=>{
+  const val = parseFloat(document.getElementById('startDepth').value);
+  if (!state.data || !isFinite(val)) return;
+  const idx = state.data.segments.findIndex(s => (s.center!=null && s.center>=val));
+  const start = idx>=0 ? idx : state.data.segments.length-1;
+  const n = Math.min(state.pageSize, state.data.segments.length - start);
+  state.rowSegIdx = Array.from({length:n}, (_,i)=> start+i);
+  state.cellSel = {};
+  render();
+});
+
+/* ===================== 表格渲染 ===================== */
+function renderTable() {
+  const table = document.getElementById('table');
+  table.innerHTML = '';
+  if (!state.data) return;
+
+  const start = (state.page-1)*state.pageSize;
+  const end   = Math.min(state.data.segments.length, start + state.pageSize);
+  const rowsN = state.rowSegIdx.length = Math.max(0, end - start);
+
+  const cats = ["荧光扫描", ...state.catsAll.filter(c=>c!=="荧光扫描" && state.visibleCats.has(c))];
+  const gridCols = cats.map((_,i)=> i===0 ? '220px' : '180px').join(' ');
+  table.style.gridTemplateColumns = gridCols;
+
+  // 锁（只改 state）
+  if (document.getElementById('rowSeqLock').checked) enforceRowLock();
+  cats.forEach(cat=>{ if (cat!=="荧光扫描" && state.colLocks[cat]) enforceColLock(cat); });
+
+  // 表头
+  cats.forEach(cat=>{
+    const head = el('div',{class:'cell head'}, cat);
+    if (cat!=="荧光扫描") {
+      const btn = el('button',{class:'lock-btn', title:'顺序锁：本列深度自上而下不倒退'}, state.colLocks[cat]?'🔒':'🔓');
+      btn.addEventListener('click', ()=>{
+        state.colLocks[cat] = !state.colLocks[cat];
+        btn.textContent = state.colLocks[cat]?'🔒':'🔓';
+        renderTable();
+      });
+      head.appendChild(btn);
+    }
+    table.appendChild(head);
+  });
+
+  // 行
+  for (let r=0; r<rowsN; r++) {
+    if (state.rowSegIdx[r]==null) state.rowSegIdx[r]=start+r;
+    const segIdx = state.rowSegIdx[r];
+    cats.forEach(cat=>{
+      if (cat==="荧光扫描") table.appendChild(cellFluo(r, segIdx));
+      else table.appendChild(cellCategory(r, segIdx, cat));
+    });
+  }
+}
+
+/* ========== 单元格：荧光（行主控） ========== */
+function cellFluo(row, segIdx) {
+  const seg = state.data.segments[segIdx];
+  const cell = el('div',{class:'cell'});
+  const fig  = el('div',{class:'thumb'});
+
+  const pack = (state.data.imagesBySegment[seg.id]||{})["荧光扫描"] || [];
+  const cur  = pack[0];
+
+  if (cur) {
+    const im = el('img',{src: previewUrl(cur, 200), alt: '荧光扫描', loading:'lazy', decoding:'async'});
+    im.addEventListener('click', ()=> showZoom(cur));
+    fig.appendChild(im);
+  } else {
+    fig.appendChild(el('div',{class:'noimg'},'—'));
+  }
+
+  const sel = el('select',{class:'depth-select'});
+  state.data.segments.forEach((s, i)=>{
+    const op = el('option',{value:String(i)}, s.label);
+    if (i===segIdx) op.selected = true;
+    sel.appendChild(op);
+  });
+  sel.addEventListener('change', async ()=>{
+    const newIdx = parseInt(sel.value,10);
+    if (document.getElementById('rowSeqLock').checked) {
+      const prevIdx = (row>0) ? state.rowSegIdx[row-1] : null;
+      if (prevIdx!=null && newIdx < prevIdx) {
+        const action = await confirmLock(
+          `当前行深度段比上一行更浅。\n是否自动调整为不倒退的最近深度段？`,
+          { scope:'row' }
+        );
+        if (action === 'fix') {
+          let cand = newIdx;
+          if (newIdx < prevIdx) cand = prevIdx;
+          state.rowSegIdx[row] = cand;
+          sel.value = String(cand);
+        } else if (action === 'once') {
+          state.rowSegIdx[row] = newIdx;
+        } else if (action === 'unlock') {
+          document.getElementById('rowSeqLock').checked = false;
+          state.rowSegIdx[row] = newIdx;
+        }
+      } else {
+        state.rowSegIdx[row] = newIdx;
+      }
+    } else {
+      state.rowSegIdx[row] = newIdx;
+    }
+    renderTable();
+  });
+
+  fig.appendChild(sel);  // 荧光列：只显示下拉，不再重复深度文字
+  cell.appendChild(fig);
+  return cell;
+}
+
+/* ========== 单元格：其他类别（段内候选） ========== */
+function cellCategory(row, segIdx, cat) {
+  const seg = state.data.segments[segIdx];
+  const pack = (state.data.imagesBySegment[seg.id]||{})[cat] || [];
+  const cell = el('div',{class:'cell'});
+  const fig  = el('div',{class:'thumb'});
+
+  if (!state.cellSel[row]) state.cellSel[row] = {};
+  if (state.cellSel[row][cat]==null) state.cellSel[row][cat]=0;
+
+  if (!pack.length) {
+    fig.appendChild(el('div',{class:'noimg'},'—'));
+    cell.appendChild(fig);
+    return cell;
+  }
+
+  const pick = Math.min(state.cellSel[row][cat], pack.length-1);
+  const cur  = pack[pick];
+
+  const im = el('img',{src: previewUrl(cur, 180), alt: cat, loading:'lazy', decoding:'async'});
+  im.addEventListener('click', ()=> showZoom(cur));
+  fig.appendChild(im);
+
+  if (pack.length > 1) {
+    // 多张：只显示下拉（不显示深度文字），并加 xN 徽标
+    const sel = el('select',{class:'depth-select'});
+    pack.forEach((it,k)=>{
+      const op = el('option',{value:String(k)}, it.depth_label || '—');
+      if (k===pick) op.selected = true;
+      sel.appendChild(op);
+    });
+    sel.addEventListener('change', async ()=>{
+      const newIdx = parseInt(sel.value,10);
+      if (state.colLocks[cat]) {
+        const prevCenter = getPrevCenter(row, cat);
+        const newCenter  = pack[newIdx]?.center ?? null;
+        if (prevCenter!=null && newCenter!=null && newCenter < prevCenter) {
+          const action = await confirmLock(
+            `本列选择的深度小于上一行，可能造成“倒退”。\n需要我帮你自动选择不倒退的最近一张吗？`,
+            { scope:'col', cat }
+          );
+          if (action === 'fix') {
+            let cand = newIdx, best = null;
+            pack.forEach((it,k)=>{
+              if (it.center!=null && it.center>=prevCenter) {
+                const diff = Math.abs(it.center - prevCenter);
+                if (best==null || diff<best.diff) best = {k, diff};
+              }
+            });
+            if (best) cand = best.k;
+            state.cellSel[row][cat] = cand;
+            renderTable();
+            return;
+          } else if (action === 'unlock') {
+            state.colLocks[cat] = false;
+          }
+        }
+      }
+      state.cellSel[row][cat] = newIdx;
+      renderTable();
+    });
+    fig.appendChild(sel);
+    fig.appendChild(el('div',{class:'badge'}, `×${pack.length}`));
+  } else {
+    // 单张：只显示深度文字（不显示下拉）
+    fig.appendChild(el('div',{class:'caption small'}, cur.depth_label || '—'));
+  }
+
+  cell.appendChild(fig);
+  return cell;
+}
+
+/* ========== 支撑函数（锁、弹窗、预览） ========== */
+function getPrevCenter(row, cat) {
+  for (let r=row-1; r>=0; r--) {
+    const segIdx = state.rowSegIdx[r];
+    const seg = state.data.segments[segIdx];
+    const pack = (state.data.imagesBySegment[seg.id]||{})[cat] || [];
+    const idx  = state.cellSel[r]?.[cat] ?? 0;
+    const it   = pack[Math.min(idx, pack.length-1)];
+    if (it && it.center!=null) return it.center;
+  }
+  return null;
+}
+function enforceRowLock() {
+  for (let r=1; r<state.rowSegIdx.length; r++) {
+    if (state.rowSegIdx[r] < state.rowSegIdx[r-1]) state.rowSegIdx[r] = state.rowSegIdx[r-1];
+  }
+}
+function enforceColLock(cat) {
+  for (let r=0; r<state.rowSegIdx.length; r++) {
+    const prev = getPrevCenter(r, cat);
+    if (prev==null) continue;
+    const segIdx = state.rowSegIdx[r];
+    const seg = state.data.segments[segIdx];
+    const pack = (state.data.imagesBySegment[seg.id]||{})[cat] || [];
+    if (!pack.length) continue;
+
+    let idx = state.cellSel[r]?.[cat] ?? 0;
+    let it  = pack[Math.min(idx, pack.length-1)];
+    if (!it || it.center==null || it.center < prev) {
+      let best = null;
+      pack.forEach((x,k)=>{
+        if (x.center!=null && x.center>=prev) {
+          const diff = Math.abs(x.center - prev);
+          if (best==null || diff<best.diff) best = {k, diff};
+        }
+      });
+      if (best) {
+        if (!state.cellSel[r]) state.cellSel[r]={};
+        state.cellSel[r][cat] = best.k;
+      }
+    }
+  }
+}
+function confirmLock(message, ctx) {
+  return new Promise(resolve=>{
+    const modal = document.getElementById('modal');
+    document.getElementById('modalMsg').textContent = message;
+    modal.classList.remove('hidden');   // 统一用类控制
+    state.modal.resolver = (v)=>{ modal.classList.add('hidden'); resolve(v); };
+    state.modal.context  = ctx;
+  });
+}
+document.getElementById('modalFix').addEventListener('click', ()=> state.modal.resolver && state.modal.resolver('fix'));
+document.getElementById('modalOnce').addEventListener('click',()=> state.modal.resolver && state.modal.resolver('once'));
+document.getElementById('modalUnlock').addEventListener('click',()=> state.modal.resolver && state.modal.resolver('unlock'));
+
+const zoom = document.getElementById('zoomModal');
+const zoomImg = document.getElementById('zoomImg');
+const zoomClose = document.getElementById('zoomClose');
+function showZoom(item){
+  zoomImg.src = previewUrl(item, 1200);
+  zoom.classList.remove('hidden');
+  zoom.focus();
+}
+function hideZoom(){
+  zoom.classList.add('hidden');
+  zoomImg.src = '';
+}
+zoomClose.addEventListener('click', hideZoom);
+zoom.addEventListener('click', (e)=>{ if (e.target===zoom || e.target.classList.contains('zoom-backdrop')) hideZoom(); });
+document.addEventListener('keydown', (e)=>{ if (!zoom.classList.contains('hidden') && e.key==='Escape') hideZoom(); });
+
+/* ===================== 事件绑定 ===================== */
+document.getElementById('btnQuery').addEventListener('click', resolveWellAndLoad);
+document.getElementById('wellInput').addEventListener('keydown', (e)=>{ if (e.key === 'Enter') resolveWellAndLoad(); });
+document.getElementById('sampleType').addEventListener('change', loadData);
+
+/* 首次：如果模板里已有精确 well，就先拉样品类型再加载数据 */
+{% if well %}
+(async ()=>{
+  await populateSampleTypes("{{ well }}");
+  await loadData();
+})();
+{% endif %}
+
 </script>
 
 <style>
-.container { max-width: 1200px; margin: 0 auto; }
-.card { background: #1f2633; border-radius: 12px; padding: 12px; }
-.btn { padding: 6px 14px; border-radius: 8px; background:#2f6fed; color:#fff; border:0; cursor:pointer; }
-.select { padding: 6px 8px; border-radius: 8px; background:#0f1420; color:#dbe2f7; border:1px solid #2a3650; }
+:root{
+  --bg:#0b1020; --card:#1f2633; --line:#2a3650; --text:#dbe2f7; --muted:#8ea2d6;
+  --accent:#2f6fed; --accent2:#2a3650; --danger:#d84e53;
+}
+.container { max-width: min(1600px, 100vw - 32px); margin: 0 auto; padding: 0 16px; }
+.topbar{display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin:16px 0;}
+.title{font-size:22px; font-weight:700;}
+.title small{font-weight:500; color:var(--muted); margin-left:6px;}
+.toolbar{display:flex; gap:12px; flex-wrap:wrap; align-items:center;}
+.field{display:flex; align-items:center; gap:8px;}
+.btn{padding:6px 12px; border-radius:8px; background:var(--accent); color:#fff; border:0; cursor:pointer;}
+.btn.secondary{background:var(--accent2);}
+.btn.danger{background:var(--danger);}
+input[type="text"], input[type="number"], select.depth-select, #sampleType{
+  padding:6px 8px; border-radius:8px; background:#0f1420; color:var(--text); border:1px solid var(--line);
+}
+.pager{display:flex; align-items:center; gap:12px; margin:8px 0;}
+.table-wrapper { position: relative; }
+.table-wrapper::after{
+  content:""; position: absolute; top:0; right:0; width:18px; height:100%;
+  pointer-events:none; background: linear-gradient(to right, rgba(11,16,32,0), rgba(11,16,32,1));
+}
 
-.grid-row { display: grid; grid-template-columns: 160px 280px repeat(7, 1fr); gap: 8px; align-items: stretch; margin-bottom: 10px; }
-.grid-cell { background:#0f1420; border:1px solid #2a3650; border-radius:10px; padding:8px; min-height: 92px; display:flex; align-items:center; justify-content:center; }
-.grid-cell.head { background:#0b1020; font-weight: 600; }
+.grid{display:grid; gap:8px;}
+.cell{
+  background:#0f1420; border:1px solid var(--line); border-radius:10px; padding:8px; min-height:152px;
+  display:flex; align-items:center; justify-content:center; box-sizing:border-box; position:relative;
+}
+.cell.head{background:#0b1020; font-weight:600; position:sticky; top:0; z-index:5;}
+.lock-btn{position:absolute; right:8px; top:6px; background:transparent; border:0; cursor:pointer; font-size:16px; color:var(--text);}
+.thumb{
+  width: 160px; height: 140px; overflow:hidden; border-radius:10px; position:relative;
+  display:flex; flex-direction:column; justify-content:center; align-items:center; gap:6px;
+}
+.thumb img{max-width:100%; max-height:100%; object-fit:contain; display:block; border-radius:8px;}
+.noimg{color:#5f6c8f;}
+.badge{
+  position: absolute;
+  top: 6px;           /* ← 从顶部显示 */
+  right: 6px;
+  bottom: auto;       /* 取消底部定位 */
+  left: auto;
+  background: rgba(0,0,0,.55);
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #fff;
+  z-index: 2;
+  pointer-events: none; /* 防止挡点击/拖动 */
+}
+.caption{font-size:12px; color:#c6d2f5;}
+.caption.small{font-size:12px; color:#c6d2f5;}
+.depth-select{width:100%;  position: relative; z-index: 1; }
+.popover{position:absolute; margin-top:8px; background:#0f1420; border:1px solid var(--line); border-radius:10px; padding:12px; z-index:10; min-width:220px;}
+.popover.hidden{display:none;}
+.popover-title{font-weight:600; margin-bottom:8px;}
+.cols-wrap{display:grid; grid-template-columns: repeat(2, 1fr); gap:8px;}
+.col-item{display:flex; align-items:center; gap:8px;}
+.lock-label{user-select:none;}
 
-.thumb-box { width: 100%; display:flex; align-items:center; justify-content:center; }
-.thumb { width: 120px; height: 120px; overflow: hidden; border-radius: 10px; position: relative; display:flex; flex-direction: column; gap:6px; align-items:center; justify-content:center; }
-.thumb img { max-width: 120px; max-height: 90px; object-fit: cover; display:block; }
-.caption { font-size: 12px; color:#c6d2f5; }
-.noimg { color:#5f6c8f; }
-.badge { position:absolute; top:4px; right:4px; background:#2a3650; color:#cdd8ff; font-size:12px; padding:2px 6px; border-radius: 8px; }
+/* 井号候选列表 */
+.well-list{display:flex; flex-direction:column; gap:8px; margin:8px 0 12px;}
+.well-item{padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#0f1420; color:var(--text); cursor:pointer; text-align:left;}
+.well-item:hover{border-color:#4a6cf3;}
+
+/* 大图预览：提高层级，避免被表头盖住 */
+.zoom{position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:5000;}
+.zoom.hidden{display:none;}
+.zoom-backdrop{position:absolute; inset:0; background:rgba(0,0,0,.72);}
+.zoom-box{position:relative; z-index:2; max-width:92vw; max-height:92vh; display:flex; align-items:center; justify-content:center;}
+#zoomImg{max-width:92vw; max-height:92vh; object-fit:contain; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.5);}
+.zoom-close{
+  position:absolute; top:-10px; right:-10px; width:36px; height:36px; border-radius:50%;
+  border:1px solid var(--line); background:#1b2335; color:#fff; font-size:20px; cursor:pointer;
+}
+
+/* 加载中遮罩 */
+.loading{position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; background:rgba(0,0,0,.35); z-index:4000;}
+.loading.hidden{display:none;}
+.spinner{width:42px; height:42px; border-radius:50%; border:4px solid rgba(255,255,255,.25); border-top-color:#fff; animation:spin 1s linear infinite;}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-text{color:#fff; font-size:14px;}
+
+/* === 补回通用弹窗样式（关键） === */
+.modal{
+  position: fixed;
+  inset: 0;
+  display: flex;                 /* 弹窗居中 */
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,.45);   /* 背景遮罩 */
+  z-index: 4500;                 /* 盖住表头等 */
+}
+.modal.hidden{ display: none; }
+
+.modal-card{
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+}
+.modal-msg{ white-space: pre-line; margin-bottom: 12px; color: var(--text); }
+.modal-actions{ display: flex; gap: 8px; justify-content: flex-end; }
+
 </style>
+
 {% endblock %}

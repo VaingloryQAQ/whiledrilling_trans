@@ -1,8 +1,0 @@
-{
-  "total": 91,
-  "ok": 0,
-  "failed": 91,
-  "anomalies": {
-    "ValueError": 91
-  }
-}

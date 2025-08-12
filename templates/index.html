@@ -1,7 +1,123 @@
-{% extends "base.html" %}
-{% block content %}<h1>上传压缩包</h1>
-<form action="/upload" method="post" enctype="multipart/form-data" class="card">
-<label>选择 ZIP：<input type="file" name="files" accept=".zip" multiple /></label>
-<button type="submit">上传并入库</button></form>
-<p class="hint">上传后将自动解压到 <code>data/extracted/</code> 并解析入库；缩略图在 <code>data/thumbs/</code>。</p>
-{% endblock %}
+<!-- 上传面板 -->
+<section style="margin:16px 0; padding:12px; border:1px solid #2a3650; border-radius:10px;">
+    <form id="uploadForm" onsubmit="return false;" enctype="multipart/form-data">
+      <label style="margin-right:8px;">选择压缩包（可多选）：</label>
+      <input id="fileInput" type="file" name="files" multiple />
+      <button id="btnUpload" type="button" class="btn" style="margin-left:8px;">上传</button>
+    </form>
+  
+    <div id="jobs" style="margin-top:12px;"></div>
+  </section>
+  
+  <script>
+  (function(){
+    const jobsEl = document.getElementById('jobs');
+    const input  = document.getElementById('fileInput');
+    const btn    = document.getElementById('btnUpload');
+  
+    btn.addEventListener('click', async ()=>{
+      if (!input.files || input.files.length === 0) {
+        alert('请先选择要上传的压缩包'); return;
+      }
+      btn.disabled = true;
+  
+      // 1) AJAX 提交到 /api/upload
+      const fd = new FormData();
+      for (const f of input.files) fd.append('files', f);
+      let resp;
+      try {
+        resp = await fetch('/api/upload', { method:'POST', body: fd });
+      } catch (e) {
+        alert('上传失败：网络异常'); btn.disabled = false; return;
+      }
+      if (!resp.ok) {
+        const t = await resp.text();
+        alert('上传失败：' + t); btn.disabled = false; return;
+      }
+      const data = await resp.json(); // {jobs: [{job_id, filename}, ...]}
+  
+      // 2) 为每个 job 显示一条进度，并开始轮询
+      data.jobs.forEach(j => addJobRow(j.job_id, j.filename));
+  
+      // 清空选择 & 允许继续上传
+      input.value = '';
+      btn.disabled = false;
+    });
+  
+    function addJobRow(jobId, filename){
+      const row = document.createElement('div');
+      row.className = 'job-row';
+      row.innerHTML = `
+        <div class="job-name" title="${filename}">${filename}</div>
+        <div class="job-bar"><div class="job-fill" style="width:0%"></div></div>
+        <div class="job-pct">0%</div>
+        <div class="job-status">排队中</div>
+      `;
+      jobsEl.prepend(row);
+      poll(jobId, row);
+    }
+  
+    async function poll(jobId, row){
+      const bar = row.querySelector('.job-fill');
+      const pct = row.querySelector('.job-pct');
+      const st  = row.querySelector('.job-status');
+  
+      while (true) {
+        let r;
+        try {
+          r = await fetch(`/api/upload/status/${jobId}`, { cache:'no-store' });
+        } catch (e) {
+          st.textContent = '进度查询失败'; break;
+        }
+        if (!r.ok) { st.textContent = '进度查询失败'; break; }
+        const j = await r.json();
+  
+        bar.style.width = (j.percent||0) + '%';
+        pct.textContent = (j.percent||0) + '%';
+        st.textContent = statusText(j);
+  
+        if (j.status === 'done') {
+          row.classList.add('ok');
+          // 可选：自动刷新图库/分组页
+          // setTimeout(()=> location.href = '/grouped', 800);
+          break;
+        }
+        if (j.status === 'error') {
+          row.classList.add('err');
+          st.title = j.message || '';
+          break;
+        }
+        await new Promise(rs => setTimeout(rs, 500));
+      }
+    }
+  
+    function statusText(j){
+      switch (j.status) {
+        case 'pending':       return '排队中…';
+        case 'extracting':    return '解压中… ' + (j.current || '');
+        case 'ingesting':     return '入库中…';
+        case 'recalculating': return '重算分类中…';
+        case 'done':          return '完成';
+        case 'error':         return '失败';
+        default:              return j.status || '';
+      }
+    }
+  })();
+  </script>
+  
+  <style>
+  /* 简洁进度样式，可放到你全局样式里 */
+  .job-row{
+    display:grid; grid-template-columns: 1fr 320px 64px 1fr;
+    align-items:center; gap:10px; padding:8px 0; border-top:1px dashed #2a3650;
+  }
+  .job-row:first-child{ border-top:0; }
+  .job-name{ overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .job-bar{ height:10px; background:#0f1420; border:1px solid #2a3650; border-radius:6px; overflow:hidden; }
+  .job-fill{ height:100%; background:#2f6fed; }
+  .job-pct{ text-align:right; width:64px; }
+  .job-status{ color:#a8b6e8; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .job-row.ok  .job-fill{ background:#3bb273; }
+  .job-row.err .job-fill{ background:#d84e53; }
+  </style>
+  
