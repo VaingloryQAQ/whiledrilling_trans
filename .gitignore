@@ -44,6 +44,9 @@ data/
 *.csv
 *.xlsx
 *.xls
+*.zip
+*.rar
+*.7z
 
 # 临时文件
 *.tmp
