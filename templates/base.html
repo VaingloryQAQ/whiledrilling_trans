@@ -6,10 +6,16 @@
 <title>{{ title if title else "Drill Image Web" }}</title>
 <link rel="stylesheet" href="/static/styles.css" />
 <link rel="icon" href="/static/favicon.ico" sizes="any">
-<script src="/static/js/performance.js"></script>
-</head>
+        
+        <!-- PDF.js CDN -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+        <script>
+            // 设置PDF.js worker路径
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        </script>
+    </head>
 <body><header class="topbar"><div class="brand">Drill Image Web</div>
-<nav><a href="/">上传</a><a href="/gallery">画廊</a><a href="/grouped">分组视图</a></nav></header>
+<nav><a href="/">上传</a><a href="/gallery">画廊</a><a href="/grouped">分组视图</a><a href="/pdf-debug">PDF调试</a></nav></header>
 <main class="container">{% block content %}{% endblock %}</main>
 <footer class="footer"><span>© 2025</span></footer>
 <script>

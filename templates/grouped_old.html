@@ -1,0 +1,768 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container">
+  <div class="topbar">
+    <div class="title">
+      <span>分组视图</span>
+      <small id="wellBadge"></small>
+    </div>
+
+    <div class="toolbar">
+      <div class="field">
+        <label>井名</label>
+        <input id="wellInput" type="text" value="{{ well }}" placeholder="例如：LK25-4-2d">
+        <button id="btnQuery" class="btn">查询</button>
+      </div>
+
+      <div class="field">
+        <label>样品类型</label>
+        <select id="sampleType"></select>
+      </div>
+
+      <div class="field">
+        <label>从深度开始</label>
+        <input id="startDepth" type="number" step="0.01" placeholder="例如 1143.4">
+        <button id="btnPreset" class="btn secondary">预排当前页</button>
+      </div>
+
+      <div class="field">
+        <label>每页行数</label>
+        <input id="rowsPerPage" type="number" min="1" value="10" style="width:80px">
+      </div>
+
+      <div class="field" style="position:relative">
+        <button id="btnCols" class="btn secondary">列显示/隐藏</button>
+        <div id="colsPanel" class="popover hidden"></div>
+      </div>
+
+      <div class="field">
+        <label class="lock-label"><input type="checkbox" id="rowSeqLock" checked> 行顺序锁（严格递增）</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="pager">
+    <button id="prevPage" class="btn secondary">上一页</button>
+    <span id="pageInfo">第 1 / 1 页</span>
+    <button id="nextPage" class="btn secondary">下一页</button>
+  </div>
+
+  <div id="tableWrapper" class="table-wrapper">
+    <div id="table" class="grid"></div>
+  </div>
+</div>
+
+<!-- 井号候选 -->
+<div id="wellPicker" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-msg">匹配到多口井，请选择：</div>
+    <div id="wellList" class="well-list"></div>
+    <div class="modal-actions">
+      <button id="wellCancel" class="btn secondary">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 列锁提示（沿用你原有弹窗，逻辑未改） -->
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <div id="modalMsg" class="modal-msg"></div>
+    <div class="modal-actions">
+      <button id="modalFix" class="btn">自动调整</button>
+      <button id="modalOnce" class="btn secondary">忽略一次</button>
+      <button id="modalUnlock" class="btn danger">关闭该锁</button>
+    </div>
+  </div>
+</div>
+
+<!-- 大图预览 -->
+<div id="zoomModal" class="zoom hidden" tabindex="-1" aria-hidden="true">
+  <div class="zoom-backdrop"></div>
+  <div class="zoom-box">
+    <img id="zoomImg" alt="预览">
+    <button id="zoomClose" class="zoom-close" title="关闭">×</button>
+  </div>
+</div>
+
+<!-- 加载中遮罩 -->
+<div id="loading" class="loading hidden">
+  <div class="spinner"></div>
+  <div class="loading-text">正在加载数据…</div>
+</div>
+
+<script>
+/* ===================== 顶部高度：三层吸顶不遮挡 ===================== */
+function measureTopBars() {
+  const header = document.querySelector('header.topbar');
+  const subbar = document.querySelector('div.topbar');
+  const headerH = header ? header.offsetHeight : 56;
+  const subbarH = subbar ? subbar.offsetHeight : 48;
+  document.documentElement.style.setProperty('--headerH', headerH + 'px');
+  document.documentElement.style.setProperty('--subbarH', subbarH + 'px');
+}
+window.addEventListener('load', measureTopBars);
+window.addEventListener('resize', measureTopBars);
+
+/* ===================== 小工具 ===================== */
+function el(tag, attrs={}, kids=[]) {
+  const e = document.createElement(tag);
+  for (const [k,v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k === 'html') e.innerHTML = v;
+    else e.setAttribute(k, v);
+  }
+  (Array.isArray(kids) ? kids : [kids]).forEach(c => e.appendChild(typeof c === "string" ? document.createTextNode(c) : c));
+  return e;
+}
+const fmtDepth = (s,e)=> (s==null||e==null) ? "—" : (Math.abs(s-e)<1e-6 ? `${s.toFixed(2)} m` : `${s.toFixed(2)}–${e.toFixed(2)} m`);
+
+function showLoading(on) {
+  document.getElementById('loading').classList.toggle('hidden', !on);
+}
+function toast(msg){ alert(msg); }
+
+/* 预览图 URL（走 /preview/{max}/{rel_path}） */
+function getRelPath(obj) {
+  if (!obj) return '';
+  if (obj.rel_path) return obj.rel_path;
+  if (obj.file_url && obj.file_url.startsWith('/files/')) {
+    const raw = obj.file_url.slice('/files/'.length);
+    try { return decodeURIComponent(raw); } catch { return raw; }
+  }
+  return '';
+}
+function previewUrl(obj, maxSide) {
+  const rel = getRelPath(obj);
+  const enc = rel.split('/').map(encodeURIComponent).join('/');
+  return `/preview/${maxSide}/${enc}`;
+}
+
+/* ===================== 全局状态 ===================== */
+const state = {
+  data: null,
+  visibleCats: new Set(),
+  colLocks: {},
+  rowSegIdx: [],
+  cellSel: {},
+  page: 1,
+  pageSize: 10,
+  modal: { resolver: null, context: null },
+  catsAll: ["荧光扫描","单偏光","正交光","三维指纹","三维立体","色谱谱图","轻烃谱图","热解谱图"],
+  isNewWell: true,    // 新井时：默认只显示有图列 + 成对显示 + 隐藏热解
+  poseSel: {}         // 壁心同深度多视图：每行的“切面/侧面”等视图选择
+};
+
+/* ===================== 成对联动 & 默认可见列 ===================== */
+const CAT_PAIRS = [
+  ["三维指纹","三维立体"],
+  ["色谱谱图","轻烃谱图"],
+  ["单偏光","正交光"]
+];
+
+function collectPresentCats(data, catsAll) {
+  const present = new Set();
+  const segs = data?.segments || [];
+  for (const seg of segs) {
+    const ibs = data?.imagesBySegment?.[seg?.id] || {};
+    for (const cat of catsAll) {
+      const arr = Array.isArray(ibs[cat]) ? ibs[cat] : [];
+      if (arr.length > 0) present.add(cat);
+    }
+  }
+  return present;
+}
+function pickDefaultVisibleCats(st) {
+  const catsAll = st.catsAll || [];
+  const present = collectPresentCats(st.data, catsAll);
+  const visible = new Set([...present]);
+
+  for (const [a,b] of CAT_PAIRS) {
+    if (visible.has(a) || visible.has(b)) {
+      if (catsAll.includes(a)) visible.add(a);
+      if (catsAll.includes(b)) visible.add(b);
+    }
+  }
+  visible.add("荧光扫描");   // 荧光始终显示
+  visible.delete("热解谱图"); // 默认隐藏热解谱图（可在面板勾回）
+  st.visibleCats = visible;
+}
+function enforcePairToggle(st, toggledCat, isOn) {
+  for (const [a,b] of CAT_PAIRS) {
+    if (toggledCat===a || toggledCat===b) {
+      const mate = (toggledCat===a? b : a);
+      if (isOn) st.visibleCats.add(mate);
+      else      st.visibleCats.delete(mate);
+    }
+  }
+}
+
+/* ===================== 行序列锁：严格递增 ===================== */
+function enforceRowLockStrict() {
+  if (!state.data || !state.data.segments) return;
+  for (let r=1; r<state.rowSegIdx.length; r++){
+    const need = (state.rowSegIdx[r-1] ?? 0) + 1;
+    state.rowSegIdx[r] = Math.max(state.rowSegIdx[r] ?? need, need);
+    const last = state.data.segments.length - 1;
+    if (state.rowSegIdx[r] > last) state.rowSegIdx[r] = last;
+  }
+}
+function enforceRowLockStrictFrom(startRow) {
+  if (!state.data || !state.data.segments) return;
+  for (let r=Math.max(1,startRow); r<state.rowSegIdx.length; r++){
+    const need = (state.rowSegIdx[r-1] ?? 0) + 1;
+    state.rowSegIdx[r] = Math.max(state.rowSegIdx[r] ?? need, need);
+    const last = state.data.segments.length - 1;
+    if (state.rowSegIdx[r] > last) state.rowSegIdx[r] = last;
+  }
+}
+
+/* ===================== 壁心同深度多视图（切/侧）识别 ===================== */
+function detectPose(it){
+  if (it && (it.pose || it.view || it.orientation)) return (it.pose || it.view || it.orientation);
+  const p = (it?.rel_path || it?.file_url || '').toString().toLowerCase();
+  if (/_cut|切面|_cf|face/.test(p)) return '切面';
+  if (/_side|侧面|_sf|side/.test(p)) return '侧面';
+  return null;
+}
+function isCoreMultiPoseAtSameDepth(pack, segCenter){
+  if (!Array.isArray(pack) || pack.length < 2) return false;
+  if (!pack.every(x => x?.sample_type === '壁心')) return false;
+  const EPS = 0.01;
+  const sameDepth = pack.filter(x => typeof x.center === 'number' && Math.abs(x.center - segCenter) <= EPS);
+  if (sameDepth.length < 2) return false;
+  const poses = Array.from(new Set(sameDepth.map(detectPose).filter(Boolean)));
+  return poses.length >= 2;
+}
+
+/* ===================== 井号解析 & 样品类型 ===================== */
+async function populateSampleTypes(well) {
+  const sel = document.getElementById('sampleType');
+  const keep = sel.value;
+  sel.innerHTML = '';
+  const optAll = document.createElement('option');
+  optAll.value = '';
+  optAll.textContent = '全部';
+  sel.appendChild(optAll);
+
+  try {
+    const url = new URL('/api/sample-types', window.location.origin);
+    if (well) url.searchParams.set('well', well);
+    const res = await fetch(url.toString());
+    const data = await res.json();
+    const types = Array.isArray(data.sample_types) ? data.sample_types : [];
+    types.forEach(t => {
+      const op = document.createElement('option'); op.value = t; op.textContent = t; sel.appendChild(op);
+    });
+    if ([...sel.options].some(o => o.value === keep)) sel.value = keep; else sel.value = '';
+  } catch (e) {
+    console.error('加载样品类型失败', e);
+    sel.value = '';
+  }
+}
+
+function showWellPicker(list) {
+  const modal = document.getElementById('wellPicker');
+  const cont  = document.getElementById('wellList');
+  cont.innerHTML = '';
+  list.forEach(w=>{
+    const item = el('button',{class:'well-item'}, w);
+    item.addEventListener('click', async ()=>{
+      document.getElementById('wellInput').value = w;
+      hideWellPicker();
+      state.isNewWell = true;
+      showLoading(true);
+      await populateSampleTypes(w);
+      await loadData();
+      showLoading(false);
+    });
+    cont.appendChild(item);
+  });
+  modal.classList.remove('hidden');
+}
+function hideWellPicker(){ document.getElementById('wellPicker').classList.add('hidden'); }
+document.getElementById('wellCancel').addEventListener('click', hideWellPicker);
+
+async function resolveWellAndLoad(){
+  const input = document.getElementById('wellInput').value.trim();
+  if (!input) { toast('请先输入井名'); return; }
+
+  showLoading(true);
+  try {
+    const res = await fetch('/api/wells?q=' + encodeURIComponent(input));
+    const data = await res.json();
+    showLoading(false);
+
+    // 兼容后端不同字段名：candidates / wells / matches
+    const cands = Array.isArray(data.candidates) ? data.candidates
+                : Array.isArray(data.wells) ? data.wells
+                : Array.isArray(data.matches) ? data.matches
+                : [];
+
+    const resolved = data.resolved || data.exact || null;
+
+    // 归一大小写与空格，判断“是否精确等同”
+    const norm = s => (s||'').toString().replace(/\s+/g,'').toLowerCase();
+    const exactSame = resolved && norm(resolved) === norm(input);
+
+    // —— 只有在“唯一且与输入精确等同”时，直接进入
+    if (cands.length === 1 && exactSame) {
+      document.getElementById('wellInput').value = resolved;
+      state.isNewWell = true;
+      await populateSampleTypes(resolved);
+      await loadData();
+      return;
+    }
+
+    // 其他情况一律弹窗
+    if (cands.length > 0) {
+      showWellPicker(cands);
+      return;
+    }
+
+    // 没有 candidates 但有 resolved：也弹窗确认一次
+    if (resolved) {
+      showWellPicker([resolved]);
+      return;
+    }
+
+    toast('没有匹配到井号');
+  } catch (e) {
+    showLoading(false);
+    console.error('[wells] fetch error:', e);
+    toast('井号解析失败');
+  }
+}
+
+
+/* ===================== 数据加载 ===================== */
+async function loadData() {
+  const well = document.getElementById('wellInput').value.trim();
+  const st   = document.getElementById('sampleType').value.trim();
+  const url = new URL('/api/grouped-data', window.location.origin);
+  if (well) url.searchParams.set('well', well);
+  if (st)   url.searchParams.set('sample_type', st);
+
+  showLoading(true);
+  const res = await fetch(url.toString());
+  const data = await res.json();
+  showLoading(false);
+
+  state.data = data;
+  document.getElementById('wellBadge').textContent = data.well ? `（${data.well}）` : '';
+
+  // 默认可见列（新井时）
+  state.catsAll = (data.categories || state.catsAll).slice();
+  if (state.isNewWell) {
+    pickDefaultVisibleCats(state);
+    state.isNewWell = false;
+  } else if (!state.visibleCats || state.visibleCats.size===0) {
+    pickDefaultVisibleCats(state);
+  }
+
+  // 初始化行（0..n-1）
+  state.page = 1;
+  state.pageSize = parseInt(document.getElementById('rowsPerPage').value || '10', 10);
+  const n = Math.min(state.pageSize, state.data.segments.length);
+  state.rowSegIdx = Array.from({length: n}, (_, i) => i);
+  state.cellSel = {};
+  state.poseSel = {};
+
+  buildColsPanel();
+  render();
+}
+
+/* ===================== 列面板 ===================== */
+function buildColsPanel() {
+  const pan = document.getElementById('colsPanel');
+  pan.innerHTML = "";
+  pan.appendChild(el('div',{class:'popover-title'},'显示的列（荧光始终显示；以下为可切换列）'));
+
+  const wrap = el('div',{class:'cols-wrap'});
+  state.catsAll.filter(c=>c!=="荧光扫描").forEach(cat => {
+    const id = 'col_'+cat;
+    const chk = el('input',{type:'checkbox', id, checked: state.visibleCats.has(cat)});
+    chk.addEventListener('change', ()=>{
+      const on = chk.checked;
+      if (on) state.visibleCats.add(cat); else state.visibleCats.delete(cat);
+      enforcePairToggle(state, cat, on);
+      renderTable();
+    });
+    const lab = el('label',{for:id},cat);
+    wrap.appendChild(el('div',{class:'col-item'},[chk, lab]));
+  });
+  pan.appendChild(wrap);
+}
+document.getElementById('btnCols').addEventListener('click', ()=>{
+  document.getElementById('colsPanel').classList.toggle('hidden');
+});
+document.addEventListener('click', (e)=>{
+  const btn = document.getElementById('btnCols');
+  const pan = document.getElementById('colsPanel');
+  if (!btn.contains(e.target) && !pan.contains(e.target)) pan.classList.add('hidden');
+});
+
+/* ===================== 渲染入口 & 分页 ===================== */
+function render() { updatePager(); renderTable(); }
+
+function updatePager() {
+  const totalRows = state.data ? state.data.segments.length : 0;
+  const totalPages = Math.max(1, Math.ceil(totalRows / state.pageSize));
+  state.page = Math.min(state.page, totalPages);
+  document.getElementById('pageInfo').textContent = `第 ${state.page} / ${totalPages} 页`;
+  document.getElementById('prevPage').disabled = state.page<=1;
+  document.getElementById('nextPage').disabled = state.page>=totalPages;
+}
+document.getElementById('prevPage').addEventListener('click', ()=>{
+  if (state.page<=1) return;
+  state.page--;
+  const start = (state.page-1)*state.pageSize;
+  const n = Math.min(state.pageSize, state.data.segments.length - start);
+  state.rowSegIdx = Array.from({length:n}, (_,i)=> start+i);
+  state.cellSel = {};
+  state.poseSel = {};
+  render();
+});
+document.getElementById('nextPage').addEventListener('click', ()=>{
+  const totalRows = state.data.segments.length;
+  const totalPages = Math.max(1, Math.ceil(totalRows/state.pageSize));
+  if (state.page>=totalPages) return;
+  state.page++;
+  const start = (state.page-1)*state.pageSize;
+  const n = Math.min(state.pageSize, totalRows - start);
+  state.rowSegIdx = Array.from({length:n}, (_,i)=> start+i);
+  state.cellSel = {};
+  state.poseSel = {};
+  render();
+});
+document.getElementById('rowsPerPage').addEventListener('change', ()=>{
+  const v = parseInt(document.getElementById('rowsPerPage').value||'10',10);
+  state.pageSize = Math.max(1, v);
+  state.page = 1;
+  const n = Math.min(state.pageSize, state.data.segments.length);
+  state.rowSegIdx = Array.from({length:n}, (_,i)=> i);
+  state.cellSel = {};
+  state.poseSel = {};
+  render();
+});
+
+/* ===================== 预排：从某深度开始 ===================== */
+document.getElementById('btnPreset').addEventListener('click', ()=>{
+  const val = parseFloat(document.getElementById('startDepth').value);
+  if (!state.data || !isFinite(val)) return;
+  const idx = state.data.segments.findIndex(s => (s.center!=null && s.center>=val));
+  const start = idx>=0 ? idx : state.data.segments.length-1;
+  const n = Math.min(state.pageSize, state.data.segments.length - start);
+  state.rowSegIdx = Array.from({length:n}, (_,i)=> start+i);
+  state.cellSel = {};
+  state.poseSel = {};
+  render();
+});
+
+/* ===================== 表格渲染（列自动铺满 + 行锁） ===================== */
+function renderTable() {
+  const table = document.getElementById('table');
+  table.innerHTML = '';
+  if (!state.data) return;
+
+  const start = (state.page-1)*state.pageSize;
+  const end   = Math.min(state.data.segments.length, start + state.pageSize);
+  const rowsN = state.rowSegIdx.length = Math.max(0, end - start);
+
+  const cats = ["荧光扫描", ...state.catsAll.filter(c=>c!=="荧光扫描" && state.visibleCats.has(c))];
+
+  // 列宽：首列 220px；其余列自适应铺满
+  const flexCols = (cats.length>1) ? ` repeat(${cats.length-1}, minmax(180px, 1fr))` : '';
+  table.style.gridTemplateColumns = `220px${flexCols}`;
+
+  if (document.getElementById('rowSeqLock').checked) enforceRowLockStrict();
+
+  // 表头
+  cats.forEach(cat=>{
+    const head = el('div',{class:'cell head'}, cat);
+    table.appendChild(head);
+  });
+
+  // 行
+  for (let r=0; r<rowsN; r++) {
+    if (state.rowSegIdx[r]==null) state.rowSegIdx[r]=start+r;
+    const segIdx = state.rowSegIdx[r];
+    cats.forEach(cat=>{
+      if (cat==="荧光扫描") table.appendChild(cellFluo(r, segIdx));
+      else table.appendChild(cellCategory(r, segIdx, cat));
+    });
+  }
+}
+
+/* ========== 单元格：荧光（含壁心多视图特例） ========== */
+/* ========== 单元格：荧光（始终“段下拉”；壁心多视图=>视图芯片） ========== */
+function cellFluo(row, segIdx) {
+  const seg = state.data.segments[segIdx];
+  const cell = el('div',{class:'cell'});
+  const fig  = el('div',{class:'thumb'});
+
+  const pack = ((state.data.imagesBySegment?.[seg?.id])||{})["荧光扫描"] || [];
+
+  // 预览：在当前段内选“最接近段中心”的一张
+  let cur = null, best = Infinity;
+  for (let i=0; i<pack.length; i++){
+    const c = pack[i]?.center;
+    if (typeof c !== 'number') continue;
+    const d = Math.abs(c - (seg?.center ?? NaN));
+    if (d < best){ best = d; cur = pack[i]; }
+  }
+  if (cur) {
+    const im = el('img',{src: previewUrl(cur, 200), alt: '荧光扫描', loading:'lazy', decoding:'async'});
+    im.addEventListener('click', ()=> showZoom(cur));
+    fig.appendChild(im);
+  } else {
+    fig.appendChild(el('div',{class:'noimg'},'—'));
+  }
+
+  // —— 段下拉：始终显示，用于筛选“所有深度”（受行锁约束）
+  const segSel = el('select',{class:'depth-select'});
+  const locked = document.getElementById('rowSeqLock').checked;
+  const minIdx = locked ? (row === 0 ? 0 : (state.rowSegIdx[row-1] + 1)) : 0;
+  if (segIdx < minIdx) { segIdx = minIdx; state.rowSegIdx[row] = segIdx; }
+
+  for (let i=minIdx; i<state.data.segments.length; i++){
+    const s = state.data.segments[i];
+    const text = s.label || (typeof s.center==="number" ? `${s.center.toFixed(2)} m` : s.id);
+    const op = el('option',{value:String(i)}, text);
+    if (i===segIdx) op.selected = true;
+    segSel.appendChild(op);
+  }
+  segSel.addEventListener('change', ()=>{
+    state.rowSegIdx[row] = parseInt(segSel.value,10);
+    if (document.getElementById('rowSeqLock').checked) enforceRowLockStrictFrom(row+1);
+    renderTable();
+  });
+  fig.appendChild(segSel);
+
+  // —— 特例：壁心 + 同一深度多视图（切/侧） => 用“视图芯片”在同深度内切换
+  if (isCoreMultiPoseAtSameDepth(pack, seg?.center ?? NaN)) {
+    state.poseSel = state.poseSel || {};
+    if (!state.poseSel[row]) {
+      const posesAll = Array.from(new Set(pack.map(detectPose).filter(Boolean)));
+      state.poseSel[row] = posesAll.includes('切面') ? '切面' : (posesAll[0] || null);
+    }
+    const wanted = state.poseSel[row];
+
+    const chipBar = el('div',{class:'pose-toggle'});
+    const poses = Array.from(new Set(pack.map(detectPose).filter(Boolean)));
+    poses.forEach(p=>{
+      const chip = el('div',{class:'pose-chip' + (p===wanted ? ' active' : '')}, p);
+      chip.addEventListener('click', ()=>{
+        state.poseSel[row] = p;
+        renderTable();
+      });
+      chipBar.appendChild(chip);
+    });
+    fig.appendChild(chipBar);
+  }
+
+  cell.appendChild(fig);
+  return cell;
+}
+
+
+/* ========== 单元格：其他类别（原逻辑保留） ========== */
+function cellCategory(row, segIdx, cat) {
+  const seg = state.data.segments[segIdx];
+  const pack = ((state.data.imagesBySegment?.[seg?.id])||{})[cat] || [];
+  const cell = el('div',{class:'cell'});
+  const fig  = el('div',{class:'thumb'});
+
+  if (!state.cellSel[row]) state.cellSel[row] = {};
+  if (state.cellSel[row][cat]==null) state.cellSel[row][cat]=0;
+
+  if (!pack.length) {
+    fig.appendChild(el('div',{class:'noimg'},'—'));
+    cell.appendChild(fig);
+    return cell;
+  }
+
+  const pick = Math.min(state.cellSel[row][cat], pack.length-1);
+  const cur  = pack[pick];
+
+  const im = el('img',{src: previewUrl(cur, 180), alt: cat, loading:'lazy', decoding:'async'});
+  im.addEventListener('click', ()=> showZoom(cur));
+  fig.appendChild(im);
+
+  if (pack.length > 1) {
+    const sel = el('select',{class:'depth-select'});
+    pack.forEach((it,k)=>{
+      const op = el('option',{value:String(k)}, it.depth_label || `#${k+1}`);
+      if (k===pick) op.selected = true;
+      sel.appendChild(op);
+    });
+    sel.addEventListener('change', ()=>{
+      state.cellSel[row][cat] = parseInt(sel.value,10);
+      renderTable();
+    });
+    fig.appendChild(sel);
+    fig.appendChild(el('div',{class:'badge'}, `×${pack.length}`));
+  } else {
+    fig.appendChild(el('div',{class:'caption small'}, cur.depth_label || '—'));
+  }
+
+  cell.appendChild(fig);
+  return cell;
+}
+
+/* ========== 列锁弹窗 & 预览（原样） ========== */
+function confirmLock(message, ctx) {
+  return new Promise(resolve=>{
+    const modal = document.getElementById('modal');
+    document.getElementById('modalMsg').textContent = message;
+    modal.classList.remove('hidden');
+    state.modal.resolver = (v)=>{ modal.classList.add('hidden'); resolve(v); };
+    state.modal.context  = ctx;
+  });
+}
+document.getElementById('modalFix').addEventListener('click', ()=> state.modal.resolver && state.modal.resolver('fix'));
+document.getElementById('modalOnce').addEventListener('click',()=> state.modal.resolver && state.modal.resolver('once'));
+document.getElementById('modalUnlock').addEventListener('click',()=> state.modal.resolver && state.modal.resolver('unlock'));
+
+const zoom = document.getElementById('zoomModal');
+const zoomImg = document.getElementById('zoomImg');
+const zoomClose = document.getElementById('zoomClose');
+function showZoom(item){ zoomImg.src = previewUrl(item, 1200); zoom.classList.remove('hidden'); zoom.focus(); }
+function hideZoom(){ zoom.classList.add('hidden'); zoomImg.src = ''; }
+zoomClose.addEventListener('click', hideZoom);
+zoom.addEventListener('click', (e)=>{ if (e.target===zoom || e.target.classList.contains('zoom-backdrop')) hideZoom(); });
+document.addEventListener('keydown', (e)=>{ if (!zoom.classList.contains('hidden') && e.key==='Escape') hideZoom(); });
+
+/* ===================== 事件 ===================== */
+document.getElementById('btnQuery').addEventListener('click', resolveWellAndLoad);
+document.getElementById('wellInput').addEventListener('keydown', (e)=>{ if (e.key === 'Enter') resolveWellAndLoad(); });
+document.getElementById('sampleType').addEventListener('change', ()=>{ state.isNewWell=false; loadData(); });
+
+{% if well %}
+(async ()=>{
+  await populateSampleTypes("{{ well }}");
+  await loadData();
+})();
+{% endif %}
+</script>
+
+<style>
+:root{
+  --bg:#0b1020; --card:#1f2633; --line:#2a3650; --text:#dbe2f7; --muted:#8ea2d6;
+  --accent:#2f6fed; --accent2:#2a3650; --danger:#d84e53;
+}
+.container { max-width: min(1600px, 100vw - 32px); margin: 0 auto; padding: 0 16px; }
+
+/* 站点头 + 本页工具条：三层吸顶 */
+header.topbar{ position: sticky; top: 0; z-index: 1000; }
+.topbar{ position: sticky; top: var(--headerH, 56px); z-index: 900; background:#0b1020; }
+
+.title{font-size:22px; font-weight:700;}
+.title small{font-weight:500; color:var(--muted); margin-left:6px;}
+.toolbar{display:flex; gap:12px; flex-wrap:wrap; align-items:center;}
+.field{display:flex; align-items:center; gap:8px;}
+.btn{padding:6px 12px; border-radius:8px; background:var(--accent); color:#fff; border:0; cursor:pointer;}
+.btn.secondary{background:var(--accent2);}
+.btn.danger{background:var(--danger);}
+input[type="text"], input[type="number"], select.depth-select, #sampleType{
+  padding:6px 8px; border-radius:8px; background:#0f1420; color:var(--text); border:1px solid var(--line);
+}
+.lock-label{user-select:none;}
+.pager{display:flex; align-items:center; gap:12px; margin:8px 0;}
+
+.table-wrapper { position: relative; }
+.grid{display:grid; gap:8px;}
+.cell{
+  background:#0f1420; border:1px solid var(--line); border-radius:10px; padding:8px; min-height:152px;
+  display:flex; align-items:center; justify-content:center; box-sizing:border-box; position:relative;
+}
+/* 只把列名这一行压窄 + 吸顶到两条工具条之下 */
+.cell.head{
+  background:#0b1020;
+  font-weight:600;
+  position: sticky;
+  top: calc(var(--headerH, 56px) + var(--subbarH, 48px)); /* 关键：吸在两条顶栏下方 */
+  z-index: 100;            /* 提高层级，避免被图片遮住 */
+
+  /* 你前面调窄的设置保留 */
+  min-height: 36px;        /* 或 32/40，按你需要 */
+  padding: 4px 8px;
+  align-items: center;
+  justify-content: center;
+}
+
+
+
+.thumb{
+  width: 160px; min-height: 140px; overflow:hidden; border-radius:10px; position:relative;
+  display:flex; flex-direction:column; justify-content:center; align-items:center; gap:6px;
+}
+.thumb img{max-width:100%; max-height:100%; object-fit:contain; display:block; border-radius:8px;}
+.noimg{color:#5f6c8f;}
+.badge{
+  position: absolute; top: 6px; right: 6px;
+  background: rgba(0,0,0,.55);
+  padding: 2px 6px; border-radius: 6px; font-size: 12px; color: #fff; z-index: 2; pointer-events: none;
+}
+.caption.small{font-size:12px; color:#c6d2f5;}
+.depth-select{width:100%;}
+.popover{position:absolute; margin-top:8px; background:#0f1420; border:1px solid var(--line); border-radius:10px; padding:12px; z-index:10; min-width:220px;}
+.popover.hidden{display:none;}
+.popover-title{font-weight:600; margin-bottom:8px;}
+.cols-wrap{display:grid; grid-template-columns: repeat(2, 1fr); gap:8px;}
+.col-item{display:flex; align-items:center; gap:8px;}
+
+/* 井号候选列表 */
+.well-list{display:flex; flex-direction:column; gap:8px; margin:8px 0 12px;}
+.well-item{padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#0f1420; color:#fff; cursor:pointer; text-align:left;}
+.well-item:hover{border-color:#4a6cf3;}
+
+/* 视图芯片（切/侧） */
+.pose-toggle { display:flex; gap:6px; margin-top:4px; flex-wrap:wrap; }
+.pose-chip {
+  padding:2px 8px; border:1px solid #2a3650; border-radius:999px; background:#0f1420;
+  color:#dbe2f7; font-size:12px; cursor:pointer; user-select:none;
+}
+.pose-chip.active { background:#2f6fed; border-color:#2f6fed; color:#fff; }
+
+/* 大图预览 & Loading */
+.zoom{position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:5000;}
+.zoom.hidden{display:none;}
+.zoom-backdrop{position:absolute; inset:0; background:rgba(0,0,0,.72);}
+.zoom-box{position:relative; z-index:2; max-width:92vw; max-height:92vh; display:flex; align-items:center; justify-content:center;}
+#zoomImg{max-width:92vw; max-height:92vh; object-fit:contain; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.5);}
+.zoom-close{
+  position:absolute; top:-10px; right:-10px; width:36px; height:36px; border-radius:50%;
+  border:1px solid var(--line); background:#1b2335; color:#fff; font-size:20px; cursor:pointer;
+}
+.loading{position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; background:rgba(0,0,0,.35); z-index:4000;}
+.loading.hidden{display:none;}
+.spinner{width:42px; height:42px; border-radius:50%; border:4px solid rgba(255,255,255,.25); border-top-color:#fff; animation:spin 1s linear infinite;}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-text{color:#fff; font-size:14px;}
+
+/* === 补回通用弹窗样式（关键） === */
+.modal{
+  position: fixed;
+  inset: 0;
+  display: flex;                 /* 弹窗居中 */
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,.45);   /* 背景遮罩 */
+  z-index: 4500;                 /* 盖住表头等 */
+}
+.modal.hidden{ display: none; }
+
+.modal-card{
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+}
+.modal-msg{ white-space: pre-line; margin-bottom: 12px; color: var(--text); }
+.modal-actions{ display: flex; gap: 8px; justify-content: flex-end; }
+
+
+</style>
+{% endblock %}

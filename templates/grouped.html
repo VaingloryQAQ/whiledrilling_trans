@@ -10,7 +10,7 @@
     <div class="toolbar">
       <div class="field">
         <label>井名</label>
-        <input id="wellInput" type="text" value="{{ well }}" placeholder="例如：BZ8-3S-11">
+        <input id="wellInput" type="text" value="{{ well }}" placeholder="例如：LK25-4-2d">
         <button id="btnQuery" class="btn">查询</button>
       </div>
 
@@ -21,7 +21,7 @@
 
       <div class="field">
         <label>从深度开始</label>
-        <input id="startDepth" type="number" step="0.01" placeholder="例如 3650">
+        <input id="startDepth" type="number" step="0.01" placeholder="例如 1143.4">
         <button id="btnPreset" class="btn secondary">预排当前页</button>
       </div>
 
@@ -36,15 +36,28 @@
       </div>
 
       <div class="field">
-        <label class="lock-label"><input type="checkbox" id="rowSeqLock" checked> 行顺序锁（荧光段递增）</label>
+        <label class="lock-label"><input type="checkbox" id="rowSeqLock" checked> 行顺序锁（严格递增）</label>
       </div>
     </div>
   </div>
 
+  <!-- 分页 + 选中条（同一行） -->
   <div class="pager">
-    <button id="prevPage" class="btn secondary">上一页</button>
-    <span id="pageInfo">第 1 / 1 页</span>
-    <button id="nextPage" class="btn secondary">下一页</button>
+    <div class="pager-left">
+      <button id="prevPage" class="btn secondary">上一页</button>
+      <span id="pageInfo">第 1 / 1 页</span>
+      <button id="nextPage" class="btn secondary">下一页</button>
+    </div>
+    <div class="selectbar">
+      <label class="select-all">
+        <input type="checkbox" id="chkSelectPage">
+        本页全选
+      </label>
+      <span class="divider">|</span>
+      <span id="selCount">已选 0 行</span>
+      <button id="btnPrintPreview" class="btn">打印预览</button>
+      <button id="btnSelClear" class="btn secondary">清空</button>
+    </div>
   </div>
 
   <div id="tableWrapper" class="table-wrapper">
@@ -52,7 +65,18 @@
   </div>
 </div>
 
-<!-- 锁提示（仅靠 .hidden 控制显隐） -->
+<!-- 井号候选 -->
+<div id="wellPicker" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-msg">匹配到多口井，请选择：</div>
+    <div id="wellList" class="well-list"></div>
+    <div class="modal-actions">
+      <button id="wellCancel" class="btn secondary">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 列锁提示（沿用） -->
 <div id="modal" class="modal hidden">
   <div class="modal-card">
     <div id="modalMsg" class="modal-msg"></div>
@@ -64,23 +88,56 @@
   </div>
 </div>
 
-<!-- 井号候选（仅靠 .hidden 控制显隐） -->
-<div id="wellPicker" class="modal hidden">
-  <div class="modal-card">
-    <div class="modal-msg">匹配到多口井，请选择：</div>
-    <div id="wellList" class="well-list"></div>
-    <div class="modal-actions">
-      <button id="wellCancel" class="btn secondary">取消</button>
-    </div>
-  </div>
-</div>
-
-<!-- 大图预览（Lightbox） -->
+<!-- 大图预览 -->
 <div id="zoomModal" class="zoom hidden" tabindex="-1" aria-hidden="true">
   <div class="zoom-backdrop"></div>
   <div class="zoom-box">
     <img id="zoomImg" alt="预览">
     <button id="zoomClose" class="zoom-close" title="关闭">×</button>
+  </div>
+</div>
+
+<!-- 打印预览覆盖层 -->
+<div id="printOverlay" class="overlay hidden" role="dialog" aria-modal="true">
+  <div class="overlay-backdrop"></div>
+  <div class="overlay-panel">
+    <div class="overlay-head">
+      <div class="ov-title">打印预览设置</div>
+      <button id="ovClose" class="btn secondary">关闭</button>
+    </div>
+
+    <div class="ov-controls">
+      <div class="ov-field">
+        <label>纸型</label>
+        <select id="ovSize">
+          <option value="A4" selected>A4</option>
+          <option value="A3">A3</option>
+        </select>
+        <span style="opacity:.8">（固定横向）</span>
+      </div>
+      <div class="ov-field">
+        <label>每页行数</label>
+        <select id="ovRows">
+          <option>4</option>
+          <option selected>5</option>
+          <option>6</option>
+          <option>7</option>
+        </select>
+      </div>
+      <div class="ov-field">
+        <label>类别</label>
+        <div id="ovCats" class="ov-cats"></div>
+      </div>
+      <div class="ov-actions">
+        <button id="ovBuild" class="btn secondary">生成预览</button>
+        <button id="ovPrint" class="btn">打印</button>
+      </div>
+    </div>
+    
+
+    <div id="printCanvas" class="print-canvas">
+      <!-- 预览内容会插入到这里 -->
+    </div>
   </div>
 </div>
 
@@ -91,6 +148,18 @@
 </div>
 
 <script>
+/* ===================== 顶部高度（用于吸顶偏移） ===================== */
+function measureTopBars() {
+  const header = document.querySelector('header.topbar');
+  const subbar = document.querySelector('div.topbar');
+  const headerH = header ? header.offsetHeight : 56;
+  const subbarH = subbar ? subbar.offsetHeight : 48;
+  document.documentElement.style.setProperty('--headerH', headerH + 'px');
+  document.documentElement.style.setProperty('--subbarH', subbarH + 'px');
+}
+window.addEventListener('load', measureTopBars);
+window.addEventListener('resize', measureTopBars);
+
 /* ===================== 小工具 ===================== */
 function el(tag, attrs={}, kids=[]) {
   const e = document.createElement(tag);
@@ -109,7 +178,7 @@ function showLoading(on) {
 }
 function toast(msg){ alert(msg); }
 
-// 预览图 URL（走 /preview/{max}/{rel_path}）
+/* 预览图 URL（走 /preview/{max}/{rel_path}） */
 function getRelPath(obj) {
   if (!obj) return '';
   if (obj.rel_path) return obj.rel_path;
@@ -132,53 +201,101 @@ const state = {
   colLocks: {},
   rowSegIdx: [],
   cellSel: {},
+  poseSel: {},       // 壁心同深度多视图：每行“切/侧”等视图选择
   page: 1,
   pageSize: 10,
   modal: { resolver: null, context: null },
-  catsAll: ["荧光扫描","单偏光","正交光","三维指纹","三维立体","色谱","轻烃谱图"],
+  catsAll: ["荧光扫描","单偏光","正交光","三维指纹","三维立体","色谱谱图","轻烃谱图","热解谱图"],
+  isNewWell: true
 };
 
-/* ===================== 先“解析井号”再加载数据 ===================== */
-async function resolveWellAndLoad(){
-  const input = document.getElementById('wellInput').value.trim();
-  if (!input) { toast('请先输入井名'); return; }
+/* ===================== 成对联动 & 默认可见列 ===================== */
+const CAT_PAIRS = [
+  ["三维指纹","三维立体"],
+  ["色谱谱图","轻烃谱图"],
+  ["单偏光","正交光"]
+];
 
-  showLoading(true);
-  try {
-    const res = await fetch('/api/wells?q=' + encodeURIComponent(input));
-    const data = await res.json();
-    showLoading(false);
-
-    const cands = Array.isArray(data.candidates) ? data.candidates : [];
-    if (cands.length === 0) {
-      toast('没有匹配到井号'); return;
+function collectPresentCats(data, catsAll) {
+  const present = new Set();
+  const segs = data?.segments || [];
+  for (const seg of segs) {
+    const ibs = data?.imagesBySegment?.[seg?.id] || {};
+    for (const cat of catsAll) {
+      const arr = Array.isArray(ibs[cat]) ? ibs[cat] : [];
+      if (arr.length > 0) present.add(cat);
     }
+  }
+  return present;
+}
+function pickDefaultVisibleCats(st) {
+  const catsAll = st.catsAll || [];
+  const present = collectPresentCats(st.data, catsAll);
+  const visible = new Set([...present]);
 
-    // 只有“唯一候选且与输入精确（忽略空格/大小写）一致”时，直接加载；其他情况一律弹窗
-    const eq = (a,b)=> a.replace(/\s+/g,'').toLowerCase() === b.replace(/\s+/g,'').toLowerCase();
-    const exactOne = (cands.length === 1) && data.resolved && eq(cands[0], input);
-
-    if (exactOne) {
-      document.getElementById('wellInput').value = data.resolved;
-      await populateSampleTypes(data.resolved);  // ← 新增
-      await loadData();
-      return;
+  for (const [a,b] of CAT_PAIRS) {
+    if (visible.has(a) || visible.has(b)) {
+      if (catsAll.includes(a)) visible.add(a);
+      if (catsAll.includes(b)) visible.add(b);
     }
-    showWellPicker(cands);
-
-  } catch (e) {
-    showLoading(false);
-    console.error(e);
-    toast('井号解析失败');
+  }
+  visible.add("荧光扫描");   // 荧光始终显示
+  visible.delete("热解谱图"); // 默认隐藏热解谱图（可在面板勾回）
+  st.visibleCats = visible;
+}
+function enforcePairToggle(st, toggledCat, isOn) {
+  for (const [a,b] of CAT_PAIRS) {
+    if (toggledCat===a || toggledCat===b) {
+      const mate = (toggledCat===a? b : a);
+      if (isOn) st.visibleCats.add(mate);
+      else      st.visibleCats.delete(mate);
+    }
   }
 }
 
+/* ===================== 行序列锁：严格递增 ===================== */
+function enforceRowLockStrict() {
+  if (!state.data || !state.data.segments) return;
+  for (let r=1; r<state.rowSegIdx.length; r++){
+    const need = (state.rowSegIdx[r-1] ?? 0) + 1;
+    state.rowSegIdx[r] = Math.max(state.rowSegIdx[r] ?? need, need);
+    const last = state.data.segments.length - 1;
+    if (state.rowSegIdx[r] > last) state.rowSegIdx[r] = last;
+  }
+}
+function enforceRowLockStrictFrom(startRow) {
+  if (!state.data || !state.data.segments) return;
+  for (let r=Math.max(1,startRow); r<state.rowSegIdx.length; r++){
+    const need = (state.rowSegIdx[r-1] ?? 0) + 1;
+    state.rowSegIdx[r] = Math.max(state.rowSegIdx[r] ?? need, need);
+    const last = state.data.segments.length - 1;
+    if (state.rowSegIdx[r] > last) state.rowSegIdx[r] = last;
+  }
+}
+
+/* ===================== 壁心同深度多视图（切/侧）识别 ===================== */
+function detectPose(it){
+  if (it && (it.pose || it.view || it.orientation)) return (it.pose || it.view || it.orientation);
+  const p = (it?.rel_path || it?.file_url || '').toString().toLowerCase();
+  if (/_cut|切面|_cf|face/.test(p)) return '切面';
+  if (/_side|侧面|_sf|side/.test(p)) return '侧面';
+  return null;
+}
+function isCoreMultiPoseAtSameDepth(pack, segCenter){
+  if (!Array.isArray(pack) || pack.length < 2) return false;
+  if (!pack.every(x => x?.sample_type === '壁心')) return false;
+  const EPS = 0.01;
+  const sameDepth = pack.filter(x => typeof x.center === 'number' && Math.abs(x.center - segCenter) <= EPS);
+  if (sameDepth.length < 2) return false;
+  const poses = Array.from(new Set(sameDepth.map(detectPose).filter(Boolean)));
+  return poses.length >= 2;
+}
+
+/* ===================== 井号解析 & 样品类型 ===================== */
 async function populateSampleTypes(well) {
   const sel = document.getElementById('sampleType');
-  const keep = sel.value; // 记住当前选择，便于刷新后保持
-  sel.innerHTML = '';     // 清空
-
-  // 先放“全部”
+  const keep = sel.value;
+  sel.innerHTML = '';
   const optAll = document.createElement('option');
   optAll.value = '';
   optAll.textContent = '全部';
@@ -190,23 +307,12 @@ async function populateSampleTypes(well) {
     const res = await fetch(url.toString());
     const data = await res.json();
     const types = Array.isArray(data.sample_types) ? data.sample_types : [];
-
     types.forEach(t => {
-      const op = document.createElement('option');
-      op.value = t;
-      op.textContent = t;
-      sel.appendChild(op);
+      const op = document.createElement('option'); op.value = t; op.textContent = t; sel.appendChild(op);
     });
-
-    // 恢复之前的选择（若还存在）；否则默认“全部”
-    if ([...sel.options].some(o => o.value === keep)) {
-      sel.value = keep;
-    } else {
-      sel.value = '';
-    }
+    if ([...sel.options].some(o => o.value === keep)) sel.value = keep; else sel.value = '';
   } catch (e) {
     console.error('加载样品类型失败', e);
-    // 失败也至少保证有“全部”
     sel.value = '';
   }
 }
@@ -220,6 +326,7 @@ function showWellPicker(list) {
     item.addEventListener('click', async ()=>{
       document.getElementById('wellInput').value = w;
       hideWellPicker();
+      state.isNewWell = true;
       showLoading(true);
       await populateSampleTypes(w);
       await loadData();
@@ -227,12 +334,125 @@ function showWellPicker(list) {
     });
     cont.appendChild(item);
   });
-  modal.classList.remove('hidden');      // 统一用类控制
+  modal.classList.remove('hidden');
 }
-function hideWellPicker(){
-  document.getElementById('wellPicker').classList.add('hidden');
-}
+function hideWellPicker(){ document.getElementById('wellPicker').classList.add('hidden'); }
 document.getElementById('wellCancel').addEventListener('click', hideWellPicker);
+
+async function resolveWellAndLoad(){
+  const input = document.getElementById('wellInput').value.trim();
+  if (!input) { toast('请先输入井名'); return; }
+
+  showLoading(true);
+  try {
+    const res = await fetch('/api/wells?q=' + encodeURIComponent(input));
+    const data = await res.json();
+    showLoading(false);
+
+    const cands = Array.isArray(data.candidates) ? data.candidates
+                : Array.isArray(data.wells) ? data.wells
+                : Array.isArray(data.matches) ? data.matches
+                : [];
+    const resolved = data.resolved || data.exact || null;
+
+    const norm = s => (s||'').toString().replace(/\s+/g,'').toLowerCase();
+    const exactSame = resolved && norm(resolved) === norm(input);
+
+    if (cands.length === 1 && exactSame) {
+      document.getElementById('wellInput').value = resolved;
+      state.isNewWell = true;
+      await populateSampleTypes(resolved);
+      await loadData();
+      return;
+    }
+    if (cands.length > 0) { showWellPicker(cands); return; }
+    if (resolved) { showWellPicker([resolved]); return; }
+    toast('没有匹配到井号');
+  } catch (e) {
+    showLoading(false);
+    console.error('[wells] fetch error:', e);
+    toast('井号解析失败');
+  }
+}
+
+/* ===================== 选择集（跨页持久化） ===================== */
+const Selection = {
+  key(){
+    const w = state.data?.well || '';
+    const st = document.getElementById('sampleType')?.value || '';
+    return `printSel:v1:${w}:${st||'ALL'}`;
+  },
+  load(){
+    try { return JSON.parse(localStorage.getItem(this.key()) || '{}'); }
+    catch { return {}; }
+  },
+  save(map){ localStorage.setItem(this.key(), JSON.stringify(map)); },
+  count(){ return Object.keys(this.load()).length; },
+  clear(){ this.save({}); updateSelCount(); },
+  isSelected(segId){ const m = this.load(); return !!m[segId]; },
+  setSelected(segId, snapshot){ const m=this.load(); m[segId]=snapshot; this.save(m); updateSelCount(); },
+  unsetSelected(segId){ const m=this.load(); delete m[segId]; this.save(m); updateSelCount(); },
+  values(){ return Object.values(this.load()); }
+};
+function updateSelCount(){
+  const n = Selection.count();
+  document.getElementById('selCount').textContent = `已选 ${n} 行`;
+}
+
+/* 生成当前行的“打印快照” */
+function snapshotRow(row, segIdx){
+  const seg = state.data.segments[segIdx];
+  const ibs = state.data.imagesBySegment?.[seg?.id] || {};
+  const catsVisible = ["荧光扫描", ...state.catsAll.filter(c=>c!=="荧光扫描" && state.visibleCats.has(c))];
+
+  const picks = {};
+
+  // 荧光扫描：当前段下、若壁心同深度多视图，则按当前“切/侧”挑
+  const packF = Array.isArray(ibs["荧光扫描"]) ? ibs["荧光扫描"] : [];
+  if (packF.length > 0) {
+    let chosen = null, best = Infinity;
+    const EPS = 0.01;
+    const coreMulti = isCoreMultiPoseAtSameDepth(packF, seg?.center ?? NaN);
+    const wanted = coreMulti ? (state.poseSel?.[row] || null) : null;
+    for (const it of packF) {
+      if (coreMulti && wanted && detectPose(it) !== wanted) continue;
+      const d = Math.abs((it.center ?? 1e9) - (seg?.center ?? -1e9));
+      if (d < best) { best = d; chosen = it; }
+    }
+    if (chosen) picks["荧光扫描"] = normalizePick(chosen);
+  }
+
+  // 其他可见列：取当前选择 index
+  for (const cat of catsVisible) {
+    if (cat === "荧光扫描") continue;
+    const pack = Array.isArray(ibs[cat]) ? ibs[cat] : [];
+    if (pack.length===0) continue;
+    const idx = Math.min(state.cellSel?.[row]?.[cat] ?? 0, pack.length-1);
+    const chosen = pack[idx];
+    if (chosen) picks[cat] = normalizePick(chosen);
+  }
+
+  return {
+    segment_id: seg.id,
+    segment_label: seg.label || (typeof seg.center==="number" ? `${seg.center.toFixed(2)} m` : seg.id),
+    well: state.data.well || "",
+    sample_type: document.getElementById('sampleType')?.value || "",
+    visible_categories: catsVisible.slice(),
+    picks,
+    ts: Date.now()
+  };
+}
+function normalizePick(it){
+  return {
+    id: it.id,
+    rel_path: getRelPath(it),
+    file_url: it.file_url,
+    depth_label: it.depth_label,
+    category: it.category,
+    sample_type: it.sample_type,
+    pose: detectPose(it)
+  };
+}
 
 /* ===================== 数据加载 ===================== */
 async function loadData() {
@@ -250,33 +470,41 @@ async function loadData() {
   state.data = data;
   document.getElementById('wellBadge').textContent = data.well ? `（${data.well}）` : '';
 
-  state.visibleCats = new Set(state.catsAll);
-  state.colLocks = {};
-  state.catsAll.forEach(c => state.colLocks[c] = false);
+  state.catsAll = (data.categories || state.catsAll).slice();
+  if (state.isNewWell) {
+    pickDefaultVisibleCats(state);
+    state.isNewWell = false;
+  } else if (!state.visibleCats || state.visibleCats.size===0) {
+    pickDefaultVisibleCats(state);
+  }
 
+  // 初始化行（0..n-1）
   state.page = 1;
   state.pageSize = parseInt(document.getElementById('rowsPerPage').value || '10', 10);
-
-  const n = Math.min(state.pageSize, data.segments.length);
-  state.rowSegIdx = Array.from({length: n}, (_,i)=> i);
+  const n = Math.min(state.pageSize, state.data.segments.length);
+  state.rowSegIdx = Array.from({length: n}, (_, i) => i);
   state.cellSel = {};
+  state.poseSel = {};
 
   buildColsPanel();
+  updateSelCount();
   render();
 }
 
-/* ===================== 列显示/隐藏面板 ===================== */
+/* ===================== 列面板 ===================== */
 function buildColsPanel() {
   const pan = document.getElementById('colsPanel');
   pan.innerHTML = "";
-  pan.appendChild(el('div',{class:'popover-title'},'显示的列（荧光列始终显示）'));
+  pan.appendChild(el('div',{class:'popover-title'},'显示的列（荧光始终显示；以下为可切换列）'));
 
   const wrap = el('div',{class:'cols-wrap'});
   state.catsAll.filter(c=>c!=="荧光扫描").forEach(cat => {
     const id = 'col_'+cat;
     const chk = el('input',{type:'checkbox', id, checked: state.visibleCats.has(cat)});
     chk.addEventListener('change', ()=>{
-      if (chk.checked) state.visibleCats.add(cat); else state.visibleCats.delete(cat);
+      const on = chk.checked;
+      if (on) state.visibleCats.add(cat); else state.visibleCats.delete(cat);
+      enforcePairToggle(state, cat, on);
       renderTable();
     });
     const lab = el('label',{for:id},cat);
@@ -293,13 +521,9 @@ document.addEventListener('click', (e)=>{
   if (!btn.contains(e.target) && !pan.contains(e.target)) pan.classList.add('hidden');
 });
 
-/* ===================== 渲染入口 ===================== */
-function render() {
-  updatePager();
-  renderTable();
-}
+/* ===================== 渲染入口 & 分页 ===================== */
+function render() { updatePager(); renderTable(); }
 
-/* ===================== 分页 ===================== */
 function updatePager() {
   const totalRows = state.data ? state.data.segments.length : 0;
   const totalPages = Math.max(1, Math.ceil(totalRows / state.pageSize));
@@ -307,7 +531,20 @@ function updatePager() {
   document.getElementById('pageInfo').textContent = `第 ${state.page} / ${totalPages} 页`;
   document.getElementById('prevPage').disabled = state.page<=1;
   document.getElementById('nextPage').disabled = state.page>=totalPages;
+
+  // 更新“本页全选”勾选态（若本页都在选集里 → 勾上）
+  const start = (state.page-1)*state.pageSize;
+  const end   = Math.min(state.data.segments.length, start + state.pageSize);
+  const allSelected = (() => {
+    for (let i=start; i<end; i++){
+      const segId = state.data.segments[i].id;
+      if (!Selection.isSelected(segId)) return false;
+    }
+    return (end>start); // 本页至少有一行时才认为全选
+  })();
+  document.getElementById('chkSelectPage').checked = allSelected;
 }
+
 document.getElementById('prevPage').addEventListener('click', ()=>{
   if (state.page<=1) return;
   state.page--;
@@ -315,6 +552,7 @@ document.getElementById('prevPage').addEventListener('click', ()=>{
   const n = Math.min(state.pageSize, state.data.segments.length - start);
   state.rowSegIdx = Array.from({length:n}, (_,i)=> start+i);
   state.cellSel = {};
+  state.poseSel = {};
   render();
 });
 document.getElementById('nextPage').addEventListener('click', ()=>{
@@ -326,6 +564,7 @@ document.getElementById('nextPage').addEventListener('click', ()=>{
   const n = Math.min(state.pageSize, totalRows - start);
   state.rowSegIdx = Array.from({length:n}, (_,i)=> start+i);
   state.cellSel = {};
+  state.poseSel = {};
   render();
 });
 document.getElementById('rowsPerPage').addEventListener('change', ()=>{
@@ -335,6 +574,7 @@ document.getElementById('rowsPerPage').addEventListener('change', ()=>{
   const n = Math.min(state.pageSize, state.data.segments.length);
   state.rowSegIdx = Array.from({length:n}, (_,i)=> i);
   state.cellSel = {};
+  state.poseSel = {};
   render();
 });
 
@@ -347,10 +587,13 @@ document.getElementById('btnPreset').addEventListener('click', ()=>{
   const n = Math.min(state.pageSize, state.data.segments.length - start);
   state.rowSegIdx = Array.from({length:n}, (_,i)=> start+i);
   state.cellSel = {};
+  state.poseSel = {};
   render();
 });
 
-/* ===================== 表格渲染 ===================== */
+/* ===================== 表格渲染（新增：选择列） ===================== */
+let lastClickedRow = null; // Shift 区间选择
+
 function renderTable() {
   const table = document.getElementById('table');
   table.innerHTML = '';
@@ -361,32 +604,67 @@ function renderTable() {
   const rowsN = state.rowSegIdx.length = Math.max(0, end - start);
 
   const cats = ["荧光扫描", ...state.catsAll.filter(c=>c!=="荧光扫描" && state.visibleCats.has(c))];
-  const gridCols = cats.map((_,i)=> i===0 ? '220px' : '180px').join(' ');
-  table.style.gridTemplateColumns = gridCols;
+  const cols = ["__select__", ...cats];
 
-  // 锁（只改 state）
-  if (document.getElementById('rowSeqLock').checked) enforceRowLock();
-  cats.forEach(cat=>{ if (cat!=="荧光扫描" && state.colLocks[cat]) enforceColLock(cat); });
+  // 列宽：选择列固定 56px；荧光 220px；其余自适应铺满
+  const restCols = (cats.length>1) ? ` 220px repeat(${cats.length-1}, minmax(180px, 1fr))` : ' 220px';
+  table.style.gridTemplateColumns = `56px${restCols}`;
+
+  if (document.getElementById('rowSeqLock').checked) enforceRowLockStrict();
 
   // 表头
-  cats.forEach(cat=>{
-    const head = el('div',{class:'cell head'}, cat);
-    if (cat!=="荧光扫描") {
-      const btn = el('button',{class:'lock-btn', title:'顺序锁：本列深度自上而下不倒退'}, state.colLocks[cat]?'🔒':'🔓');
-      btn.addEventListener('click', ()=>{
-        state.colLocks[cat] = !state.colLocks[cat];
-        btn.textContent = state.colLocks[cat]?'🔒':'🔓';
-        renderTable();
+  cols.forEach(col=>{
+    if (col==="__select__") {
+      const head = el('div',{class:'cell head'}, '');
+      // 本页全选（与上方工具条同一功能，重复一个入口）
+      const wrap = el('label',{class:'chk-all'},[
+        el('input',{type:'checkbox', id:'chkAllHeader', checked: document.getElementById('chkSelectPage').checked}),
+        document.createTextNode('本页全选')
+      ]);
+      wrap.querySelector('input').addEventListener('change', (e)=>{
+        document.getElementById('chkSelectPage').checked = e.target.checked;
+        toggleSelectPage(e.target.checked);
       });
-      head.appendChild(btn);
+      head.appendChild(wrap);
+      table.appendChild(head);
+    } else {
+      table.appendChild(el('div',{class:'cell head'}, col));
     }
-    table.appendChild(head);
   });
 
   // 行
   for (let r=0; r<rowsN; r++) {
     if (state.rowSegIdx[r]==null) state.rowSegIdx[r]=start+r;
     const segIdx = state.rowSegIdx[r];
+    const seg = state.data.segments[segIdx];
+
+    // 选择列（行复选框）
+    const selCell = el('div',{class:'cell select-cell'});
+    const cb = el('input',{type:'checkbox', class:'row-check'});
+    cb.checked = Selection.isSelected(seg.id);
+    cb.addEventListener('click', (ev)=>{
+      // 支持 Shift 区间
+      if (ev.shiftKey && lastClickedRow!=null){
+        const a = Math.min(lastClickedRow, r), b = Math.max(lastClickedRow, r);
+        const on = cb.checked;
+        for (let rr=a; rr<=b; rr++){
+          const sIdx = state.rowSegIdx[rr];
+          const sId  = state.data.segments[sIdx].id;
+          if (on) Selection.setSelected(sId, snapshotRow(rr, sIdx));
+          else    Selection.unsetSelected(sId);
+        }
+        renderTable(); // 刷新勾选态
+      } else {
+        if (cb.checked) Selection.setSelected(seg.id, snapshotRow(r, segIdx));
+        else            Selection.unsetSelected(seg.id);
+        lastClickedRow = r;
+      }
+      updatePager();
+    });
+    selCell.appendChild(cb);
+    table.appendChild(selCell);
+
+    // 其余列
     cats.forEach(cat=>{
       if (cat==="荧光扫描") table.appendChild(cellFluo(r, segIdx));
       else table.appendChild(cellCategory(r, segIdx, cat));
@@ -394,15 +672,28 @@ function renderTable() {
   }
 }
 
-/* ========== 单元格：荧光（行主控） ========== */
+/* ========== 单元格：荧光（始终“段下拉”；壁心多视图=>视图芯片） ========== */
 function cellFluo(row, segIdx) {
   const seg = state.data.segments[segIdx];
   const cell = el('div',{class:'cell'});
   const fig  = el('div',{class:'thumb'});
 
-  const pack = (state.data.imagesBySegment[seg.id]||{})["荧光扫描"] || [];
-  const cur  = pack[0];
+  const pack = ((state.data.imagesBySegment?.[seg?.id])||{})["荧光扫描"] || [];
 
+  // 预览：在当前段内选“最接近段中心”的一张（若壁心多视图，再由视图芯片决定）
+  let cur = null, best = Infinity;
+  const EPS = 0.01;
+  const coreMulti = isCoreMultiPoseAtSameDepth(pack, seg?.center ?? NaN);
+  const wanted = coreMulti ? (state.poseSel?.[row] || null) : null;
+
+  for (let i=0; i<pack.length; i++){
+    const it = pack[i];
+    if (coreMulti && wanted && detectPose(it)!==wanted) continue;
+    const c = it?.center;
+    if (typeof c !== 'number') continue;
+    const d = Math.abs(c - (seg?.center ?? NaN));
+    if (d < best){ best = d; cur = it; }
+  }
   if (cur) {
     const im = el('img',{src: previewUrl(cur, 200), alt: '荧光扫描', loading:'lazy', decoding:'async'});
     im.addEventListener('click', ()=> showZoom(cur));
@@ -411,50 +702,55 @@ function cellFluo(row, segIdx) {
     fig.appendChild(el('div',{class:'noimg'},'—'));
   }
 
-  const sel = el('select',{class:'depth-select'});
-  state.data.segments.forEach((s, i)=>{
-    const op = el('option',{value:String(i)}, s.label);
+  // 段下拉（始终显示；受行锁约束）
+  const segSel = el('select',{class:'depth-select'});
+  const locked = document.getElementById('rowSeqLock').checked;
+  const minIdx = locked ? (row === 0 ? 0 : (state.rowSegIdx[row-1] + 1)) : 0;
+  if (segIdx < minIdx) { segIdx = minIdx; state.rowSegIdx[row] = segIdx; }
+
+  for (let i=minIdx; i<state.data.segments.length; i++){
+    const s = state.data.segments[i];
+    const text = s.label || (typeof s.center==="number" ? `${s.center.toFixed(2)} m` : s.id);
+    const op = el('option',{value:String(i)}, text);
     if (i===segIdx) op.selected = true;
-    sel.appendChild(op);
-  });
-  sel.addEventListener('change', async ()=>{
-    const newIdx = parseInt(sel.value,10);
-    if (document.getElementById('rowSeqLock').checked) {
-      const prevIdx = (row>0) ? state.rowSegIdx[row-1] : null;
-      if (prevIdx!=null && newIdx < prevIdx) {
-        const action = await confirmLock(
-          `当前行深度段比上一行更浅。\n是否自动调整为不倒退的最近深度段？`,
-          { scope:'row' }
-        );
-        if (action === 'fix') {
-          let cand = newIdx;
-          if (newIdx < prevIdx) cand = prevIdx;
-          state.rowSegIdx[row] = cand;
-          sel.value = String(cand);
-        } else if (action === 'once') {
-          state.rowSegIdx[row] = newIdx;
-        } else if (action === 'unlock') {
-          document.getElementById('rowSeqLock').checked = false;
-          state.rowSegIdx[row] = newIdx;
-        }
-      } else {
-        state.rowSegIdx[row] = newIdx;
-      }
-    } else {
-      state.rowSegIdx[row] = newIdx;
-    }
+    segSel.appendChild(op);
+  }
+  segSel.addEventListener('change', ()=>{
+    state.rowSegIdx[row] = parseInt(segSel.value,10);
+    if (document.getElementById('rowSeqLock').checked) enforceRowLockStrictFrom(row+1);
     renderTable();
   });
+  fig.appendChild(segSel);
 
-  fig.appendChild(sel);  // 荧光列：只显示下拉，不再重复深度文字
+  // 壁心同深度多视图 → 视图芯片（切/侧）
+  if (coreMulti) {
+    state.poseSel = state.poseSel || {};
+    if (!state.poseSel[row]) {
+      const posesAll = Array.from(new Set(pack.map(detectPose).filter(Boolean)));
+      state.poseSel[row] = posesAll.includes('切面') ? '切面' : (posesAll[0] || null);
+    }
+    const wantedPose = state.poseSel[row];
+    const chipBar = el('div',{class:'pose-toggle'});
+    const poses = Array.from(new Set(pack.map(detectPose).filter(Boolean)));
+    poses.forEach(p=>{
+      const chip = el('div',{class:'pose-chip' + (p===wantedPose ? ' active' : '')}, p);
+      chip.addEventListener('click', ()=>{
+        state.poseSel[row] = p;
+        renderTable();
+      });
+      chipBar.appendChild(chip);
+    });
+    fig.appendChild(chipBar);
+  }
+
   cell.appendChild(fig);
   return cell;
 }
 
-/* ========== 单元格：其他类别（段内候选） ========== */
+/* ========== 单元格：其他类别（原逻辑保留） ========== */
 function cellCategory(row, segIdx, cat) {
   const seg = state.data.segments[segIdx];
-  const pack = (state.data.imagesBySegment[seg.id]||{})[cat] || [];
+  const pack = ((state.data.imagesBySegment?.[seg?.id])||{})[cat] || [];
   const cell = el('div',{class:'cell'});
   const fig  = el('div',{class:'thumb'});
 
@@ -475,47 +771,19 @@ function cellCategory(row, segIdx, cat) {
   fig.appendChild(im);
 
   if (pack.length > 1) {
-    // 多张：只显示下拉（不显示深度文字），并加 xN 徽标
     const sel = el('select',{class:'depth-select'});
     pack.forEach((it,k)=>{
-      const op = el('option',{value:String(k)}, it.depth_label || '—');
+      const op = el('option',{value:String(k)}, it.depth_label || `#${k+1}`);
       if (k===pick) op.selected = true;
       sel.appendChild(op);
     });
-    sel.addEventListener('change', async ()=>{
-      const newIdx = parseInt(sel.value,10);
-      if (state.colLocks[cat]) {
-        const prevCenter = getPrevCenter(row, cat);
-        const newCenter  = pack[newIdx]?.center ?? null;
-        if (prevCenter!=null && newCenter!=null && newCenter < prevCenter) {
-          const action = await confirmLock(
-            `本列选择的深度小于上一行，可能造成“倒退”。\n需要我帮你自动选择不倒退的最近一张吗？`,
-            { scope:'col', cat }
-          );
-          if (action === 'fix') {
-            let cand = newIdx, best = null;
-            pack.forEach((it,k)=>{
-              if (it.center!=null && it.center>=prevCenter) {
-                const diff = Math.abs(it.center - prevCenter);
-                if (best==null || diff<best.diff) best = {k, diff};
-              }
-            });
-            if (best) cand = best.k;
-            state.cellSel[row][cat] = cand;
-            renderTable();
-            return;
-          } else if (action === 'unlock') {
-            state.colLocks[cat] = false;
-          }
-        }
-      }
-      state.cellSel[row][cat] = newIdx;
+    sel.addEventListener('change', ()=>{
+      state.cellSel[row][cat] = parseInt(sel.value,10);
       renderTable();
     });
     fig.appendChild(sel);
     fig.appendChild(el('div',{class:'badge'}, `×${pack.length}`));
   } else {
-    // 单张：只显示深度文字（不显示下拉）
     fig.appendChild(el('div',{class:'caption small'}, cur.depth_label || '—'));
   }
 
@@ -523,54 +791,362 @@ function cellCategory(row, segIdx, cat) {
   return cell;
 }
 
-/* ========== 支撑函数（锁、弹窗、预览） ========== */
-function getPrevCenter(row, cat) {
-  for (let r=row-1; r>=0; r--) {
-    const segIdx = state.rowSegIdx[r];
-    const seg = state.data.segments[segIdx];
-    const pack = (state.data.imagesBySegment[seg.id]||{})[cat] || [];
-    const idx  = state.cellSel[r]?.[cat] ?? 0;
-    const it   = pack[Math.min(idx, pack.length-1)];
-    if (it && it.center!=null) return it.center;
+/* ===================== 选择：批量 / 清空 ===================== */
+document.getElementById('chkSelectPage').addEventListener('change', (e)=>{
+  toggleSelectPage(e.target.checked);
+});
+function toggleSelectPage(on){
+  const start = (state.page-1)*state.pageSize;
+  const end   = Math.min(state.data.segments.length, start + state.pageSize);
+  for (let i=start; i<end; i++){
+    const seg = state.data.segments[i];
+    const row = i - start;
+    if (on) Selection.setSelected(seg.id, snapshotRow(row, i));
+    else    Selection.unsetSelected(seg.id);
   }
-  return null;
+  renderTable(); // 刷新行勾选
 }
-function enforceRowLock() {
-  for (let r=1; r<state.rowSegIdx.length; r++) {
-    if (state.rowSegIdx[r] < state.rowSegIdx[r-1]) state.rowSegIdx[r] = state.rowSegIdx[r-1];
+document.getElementById('btnSelClear').addEventListener('click', ()=>{
+  if (confirm('确定清空当前井/样品类型的选集吗？')) {
+    Selection.clear();
+    renderTable();
+    updatePager();
   }
-}
-function enforceColLock(cat) {
-  for (let r=0; r<state.rowSegIdx.length; r++) {
-    const prev = getPrevCenter(r, cat);
-    if (prev==null) continue;
-    const segIdx = state.rowSegIdx[r];
-    const seg = state.data.segments[segIdx];
-    const pack = (state.data.imagesBySegment[seg.id]||{})[cat] || [];
-    if (!pack.length) continue;
+});
 
-    let idx = state.cellSel[r]?.[cat] ?? 0;
-    let it  = pack[Math.min(idx, pack.length-1)];
-    if (!it || it.center==null || it.center < prev) {
-      let best = null;
-      pack.forEach((x,k)=>{
-        if (x.center!=null && x.center>=prev) {
-          const diff = Math.abs(x.center - prev);
-          if (best==null || diff<best.diff) best = {k, diff};
+/* ===================== 打印预览功能 ===================== */
+
+/**
+ * 打开打印预览覆盖层
+ * 功能：
+ * 1. 显示打印设置界面
+ * 2. 动态生成类别选择列表
+ * 3. 根据当前可见列和选集数据智能排序类别
+ */
+function openPrintOverlay(){
+  // 构造默认类别列表：荧光扫描 + 当前可见列
+  const catsDefault = ["荧光扫描", ...state.catsAll.filter(c=>c!=="荧光扫描" && state.visibleCats.has(c))];
+
+  // 从选集汇总可能出现过的类别（有助于跨页/跨列的一致性）
+  const setAll = new Set();
+  Selection.values().forEach(snap=>{
+    Object.keys(snap.picks||{}).forEach(c=> setAll.add(c));
+  });
+  const allCats = setAll.size ? Array.from(setAll) : catsDefault;
+
+  // 生成类别选择界面
+  const box = document.getElementById('ovCats');
+  box.innerHTML = '';
+  // 用"当前可见列顺序"作为排序权重，保持界面一致性
+  const order = new Map(catsDefault.map((c,i)=>[c,i]));
+  allCats.sort((a,b)=> (order.get(a)??999) - (order.get(b)??999));
+  allCats.forEach(c=>{
+    const id = 'ovc_'+c;
+    const chk = el('input',{type:'checkbox', id, checked: catsDefault.includes(c)});
+    const lab = el('label',{for:id}, c);
+    box.appendChild(el('div',{class:'ov-cat-item'}, [chk, lab]));
+  });
+
+  document.getElementById('printOverlay').classList.remove('hidden');
+}
+
+/**
+ * 应用页面尺寸设置
+ * 设置CSS @page规则，支持A4/A3横向打印
+ */
+function applyPageSize(size){ // A4 / A3，固定横向
+  const id = 'printPageSizeStyle';
+  let tag = document.getElementById(id);
+  if (!tag) { tag = document.createElement('style'); tag.id = id; document.head.appendChild(tag); }
+  tag.textContent = `@page { size: ${size} landscape; margin: 0; }`;
+}
+
+/**
+ * 构建打印预览
+ * 功能：
+ * 1. 根据纸张尺寸和每页行数计算布局
+ * 2. 生成预览画布，显示实际打印效果
+ * 3. 支持多页预览
+ */
+function buildPrintPreview(){
+  const canvas = document.getElementById('printCanvas');
+  canvas.innerHTML = '';
+
+  // —— 获取打印配置 —— //
+  const paper = (document.getElementById('ovSize')?.value || 'A4'); // A4/A3
+  const rowsPerPage = parseInt(document.getElementById('ovRows')?.value || '3', 10) || 3;
+  applyPageSize(paper); // 应用横向，0边距设置
+
+  // 页面尺寸（毫米）
+  const pgW = (paper === 'A3') ? 420 : 297;   // 横向的宽
+  const pgH = (paper === 'A3') ? 297 : 210;   // 横向的高
+  const pad = 10;                              // 内边距（毫米）
+  const innerH = pgH - pad*2;
+
+  // 行/列间距（毫米）
+  const rowGap = 6, colGap = 6;
+
+  // 获取勾选的类别（按"当前可见列"排序）
+  const catsDefault = ["荧光扫描", ...state.catsAll.filter(c=>c!=="荧光扫描" && state.visibleCats.has(c))];
+  const order = new Map(catsDefault.map((c,i)=>[c,i]));
+  const want = [...document.querySelectorAll('#ovCats input[type="checkbox"]')]
+    .filter(x=>x.checked).map(x=> x.id.replace(/^ovc_/,''))
+    .sort((a,b)=> (order.get(a)??999) - (order.get(b)??999));
+  if (want.length === 0) { canvas.appendChild(el('div',{class:'empty'}, '请至少选择一个类别')); return; }
+
+  // —— 计算每页布局尺寸 —— //
+  // 行高 = (可用高 - (N-1)*行距) / N；再给字幕留 8~10mm
+  const captionH = 9; // 每格字幕高度（毫米）
+  const rowH = (innerH - (rowsPerPage - 1) * rowGap) / rowsPerPage;
+  const imgH = Math.max(20, rowH - captionH);   // 每格图片高度（毫米）
+
+  // 组装列模板
+  const colTemplate = `repeat(${want.length}, 1fr)`;
+
+  const snaps = Selection.values();
+  if (!snaps.length) { canvas.appendChild(el('div',{class:'empty'}, '未选择任何行')); return; }
+
+  // —— 按页切分数据 —— //
+  for (let i = 0; i < snaps.length; i += rowsPerPage) {
+    const pageSnaps = snaps.slice(i, i + rowsPerPage);
+
+    // 单页容器（设置CSS变量用于精确布局）
+    const page = el('section', { class:'print-page' });
+    page.style.setProperty('--pgWmm',  pgW + 'mm');
+    page.style.setProperty('--pgHmm',  pgH + 'mm');
+    page.style.setProperty('--pgPadmm', pad + 'mm');
+    page.style.setProperty('--rowGapmm', rowGap + 'mm');
+    page.style.setProperty('--colGapmm', colGap + 'mm');
+    page.style.setProperty('--rowImgHmm', imgH + 'mm');
+    page.style.setProperty('--colTemplate', colTemplate);
+
+    const sheet = el('div', { class:'pv-sheet' });
+
+    // 每一行 = 一个深度段；行内 = 所有勾选类别
+    pageSnaps.forEach(snap=>{
+      const row = el('div', { class:'pv-row' });
+      want.forEach(cat=>{
+        const it = (snap.picks||{})[cat] || null;
+        const cell = el('div',{class:'pv-cell'});
+        if (it && (it.rel_path || it.file_url)) {
+          // 生成预览图片URL
+          const src = it.rel_path ? `/preview/1200/${encodeURIComponent(it.rel_path)}` : it.file_url;
+          cell.appendChild(el('img',{src, alt: `${cat}`}));
+          // 生成图片说明文字
+          cell.appendChild(el('div',{class:'pv-cap'}, `${snap.well||''} · ${snap.segment_label||''} · ${cat}${it.pose?(' · '+it.pose):''}`));
+        } else {
+          // 无图片时的占位说明
+          cell.appendChild(el('div',{class:'pv-cap'}, `${snap.well||''} · ${snap.segment_label||''} · ${cat} · —`));
         }
+        row.appendChild(cell);
       });
-      if (best) {
-        if (!state.cellSel[r]) state.cellSel[r]={};
-        state.cellSel[r][cat] = best.k;
-      }
-    }
+      sheet.appendChild(row);
+    });
+
+    page.appendChild(sheet);
+    canvas.appendChild(page);
   }
 }
+
+/**
+ * 关闭打印预览覆盖层
+ */
+function closePrintOverlay(){
+  document.getElementById('printOverlay').classList.add('hidden');
+  document.getElementById('printCanvas').innerHTML = '';
+}
+
+/**
+ * 执行打印操作
+ * 功能：
+ * 1. 验证选集数据
+ * 2. 生成完整的打印HTML
+ * 3. 打开新窗口并调用浏览器打印
+ */
+function doPrint(){
+  const snaps = Selection.values();
+  if (!snaps.length) { alert('请选择要打印的行'); return; }
+
+  const cfg = getPrintConfig();                   // 获取打印配置
+  const html = buildPrintPagesHTML(cfg, snaps);   // 生成打印页完整HTML
+
+  const w = window.open('', '_blank');            // 打开干净的打印窗口
+  if (!w) { alert('弹窗被拦截了，请允许本网站打开新窗口'); return; }
+
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+
+  // 等待所有图片加载完成后再打印
+  const waitImages = () => Promise.all(
+    Array.from(w.document.images).map(img => img.complete
+      ? Promise.resolve()
+      : new Promise(res => { img.onload = img.onerror = res; }))
+  );
+
+  w.addEventListener('load', async () => {
+    try { await waitImages(); } catch(e) {}
+    w.focus();
+    w.print();  // 调用浏览器打印
+    w.onafterprint = () => { try { w.close(); } catch(e) {} };  // 打印完成后关闭窗口
+  });
+}
+
+/**
+ * 获取打印配置
+ * 返回纸张类型、每页行数、勾选类别等信息
+ */
+function getPrintConfig(){
+  const paper = (document.getElementById('ovSize')?.value || 'A4');                 // A4/A3（固定横向）
+  const rowsPerPage = parseInt(document.getElementById('ovRows')?.value || '3', 10) || 3;
+  const catsDefault = ["荧光扫描", ...state.catsAll.filter(c=>c!=="荧光扫描" && state.visibleCats.has(c))];
+  const order = new Map(catsDefault.map((c,i)=>[c,i]));
+  const want = [...document.querySelectorAll('#ovCats input[type="checkbox"]')]
+    .filter(x=>x.checked).map(x=> x.id.replace(/^ovc_/,''))
+    .sort((a,b)=> (order.get(a)??999) - (order.get(b)??999));
+  return { paper, rowsPerPage, want, order };
+}
+
+/**
+ * 构建打印页面HTML
+ * 功能：
+ * 1. 生成完整的打印HTML文档
+ * 2. 包含精确的CSS布局样式
+ * 3. 支持多页打印
+ * 4. 优化打印效果
+ */
+function buildPrintPagesHTML(cfg, snaps){
+  const { paper, rowsPerPage, want } = cfg;
+
+  // 纸张尺寸（横向，单位毫米）
+  const pgW = (paper === 'A3') ? 420 : 297;
+  const pgH = (paper === 'A3') ? 297 : 210;
+
+  // —— 版式常量（全部用毫米，避免缩放四舍五入问题）——
+  const pad       = 10;    // 基础页边距
+  const rowGap    = 6;     // 行间距
+  const colGap    = 6;     // 列间距
+  const bd        = 0.4;   // 单元格边框
+  const cellPad   = 2;     // 单元格内边距
+  const capHmm    = 7;     // 字幕固定高度
+  const vFudge    = 0.6;   // 纵向保险（毫米）
+  const wFudge    = 1.0;   // 横向保险（毫米）← 关键：给右边留一点富余
+
+  // 可用高度 & 每行固定高度（毫米）
+  const innerH = pgH - pad * 2;
+  const rowHmm = (innerH - (rowsPerPage - 1) * rowGap - vFudge) / rowsPerPage;
+
+  // 图片高度 = 行高 -（上下内边距 + 上下边框 + 字幕）
+  const imgHmm = Math.max(15, rowHmm - (2 * cellPad + 2 * bd + capHmm));
+
+  // 列模板（minmax(0,1fr) 能避免因取整导致的溢出）
+  const colTemplate = `repeat(${want.length}, minmax(0, 1fr))`;
+
+  // 工具函数：URL编码和图片源生成
+  const encRel = (rel) => rel.split('/').map(encodeURIComponent).join('/');
+  const imgSrc = (it) => it?.rel_path
+    ? `${location.origin}/preview/1200/${encRel(it.rel_path)}`
+    : (it?.file_url || '');
+
+  // 分页切片
+  const pages = [];
+  for (let i = 0; i < snaps.length; i += rowsPerPage) {
+    pages.push(snaps.slice(i, i + rowsPerPage));
+  }
+
+  // 生成每页HTML
+  const pageHTML = pages.map(pageSnaps => {
+    const rowsHTML = pageSnaps.map(snap => {
+      const cells = want.map(cat => {
+        const it  = (snap.picks || {})[cat] || null;
+        const cap = `${snap.well || ''} · ${snap.segment_label || ''} · ${cat}${it && it.pose ? (' · ' + it.pose) : ''}`;
+        if (it && (it.rel_path || it.file_url)) {
+          return `
+            <div class="pv-cell">
+              <img src="${imgSrc(it)}" alt="${cat}">
+              <div class="pv-cap" title="${cap}">${cap}</div>
+            </div>`;
+        } else {
+          return `<div class="pv-cell"><div class="pv-cap" title="${cap}">${cap}</div></div>`;
+        }
+      }).join('');
+      return `<div class="pv-row">${cells}</div>`;
+    }).join('');
+
+    return `
+<section class="print-page"
+  style="--pgWmm:${pgW}mm;--pgHmm:${pgH}mm;
+         --padL:${pad}mm;--padR:${pad + wFudge}mm; /* 右侧多留 wFudge */ 
+         --padT:${pad}mm;--padB:${pad}mm;
+         --rowGapmm:${rowGap}mm;--colGapmm:${colGap}mm;
+         --bdHmm:${bd}mm;--cellPadmm:${cellPad}mm;
+         --capHmm:${capHmm}mm;--rowHmm:${rowHmm}mm;--imgHmm:${imgHmm}mm;
+         --colTemplate:${colTemplate}">
+  <div class="pv-sheet">
+    ${rowsHTML}
+  </div>
+</section>`;
+  }).join('');
+
+  // 返回完整的HTML文档
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>打印</title>
+<style>
+  html,body{margin:0;padding:0;background:#fff;color:#111;
+    font:13px/1.35 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,
+          'Helvetica Neue','PingFang SC','Noto Sans CJK SC',Arial;}
+  @page { size: ${paper} landscape; margin: 0; }
+
+  /* 页面容器：右侧 padding = pad + wFudge，避免最后一列被裁 */
+  .print-page{
+    width: var(--pgWmm); height: var(--pgHmm);
+    padding-left: var(--padL); padding-right: var(--padR);
+    padding-top: var(--padT);  padding-bottom: var(--padB);
+    box-sizing: border-box; page-break-after: always;
+  }
+  .print-page:last-child{ page-break-after: auto; }
+
+  .pv-sheet{ display:flex; flex-direction:column; gap: var(--rowGapmm); height:100%; }
+
+  /* 每页固定 N 行；行内均分列 */
+  .pv-row{
+    display:grid; grid-template-columns: var(--colTemplate);
+    gap: var(--colGapmm); height: var(--rowHmm);
+    overflow: hidden; /* 防止任何子元素把行撑高/撑宽 */
+  }
+
+  .pv-cell{
+    box-sizing: border-box; height: 100%;
+    border: var(--bdHmm) solid #d9d9d9; border-radius: 6px;
+    padding: var(--cellPadmm); display:flex; flex-direction:column;
+  }
+  .pv-cell img{ width:100%; height: var(--imgHmm); object-fit: contain; border-radius:4px; }
+  .pv-cap{ height: var(--capHmm); line-height: var(--capHmm);
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+          font-size: 11px; color:#333; }
+</style>
+</head>
+<body>
+${pageHTML}
+</body>
+</html>`;
+}
+
+// 绑定事件监听器
+document.getElementById('btnPrintPreview').addEventListener('click', openPrintOverlay);
+document.getElementById('ovClose').addEventListener('click', closePrintOverlay);
+document.getElementById('ovBuild').addEventListener('click', buildPrintPreview);
+document.getElementById('ovPrint').addEventListener('click', doPrint);
+
+/* ========== 弹窗 & 预览（沿用） ========== */
 function confirmLock(message, ctx) {
   return new Promise(resolve=>{
     const modal = document.getElementById('modal');
     document.getElementById('modalMsg').textContent = message;
-    modal.classList.remove('hidden');   // 统一用类控制
+    modal.classList.remove('hidden');
     state.modal.resolver = (v)=>{ modal.classList.add('hidden'); resolve(v); };
     state.modal.context  = ctx;
   });
@@ -582,32 +1158,24 @@ document.getElementById('modalUnlock').addEventListener('click',()=> state.modal
 const zoom = document.getElementById('zoomModal');
 const zoomImg = document.getElementById('zoomImg');
 const zoomClose = document.getElementById('zoomClose');
-function showZoom(item){
-  zoomImg.src = previewUrl(item, 1200);
-  zoom.classList.remove('hidden');
-  zoom.focus();
-}
-function hideZoom(){
-  zoom.classList.add('hidden');
-  zoomImg.src = '';
-}
+function showZoom(item){ zoomImg.src = previewUrl(item, 1200); zoom.classList.remove('hidden'); zoom.focus(); }
+function hideZoom(){ zoom.classList.add('hidden'); zoomImg.src = ''; }
 zoomClose.addEventListener('click', hideZoom);
 zoom.addEventListener('click', (e)=>{ if (e.target===zoom || e.target.classList.contains('zoom-backdrop')) hideZoom(); });
 document.addEventListener('keydown', (e)=>{ if (!zoom.classList.contains('hidden') && e.key==='Escape') hideZoom(); });
 
-/* ===================== 事件绑定 ===================== */
+/* ===================== 事件 ===================== */
 document.getElementById('btnQuery').addEventListener('click', resolveWellAndLoad);
 document.getElementById('wellInput').addEventListener('keydown', (e)=>{ if (e.key === 'Enter') resolveWellAndLoad(); });
-document.getElementById('sampleType').addEventListener('change', loadData);
+document.getElementById('sampleType').addEventListener('change', ()=>{ state.isNewWell=false; loadData(); });
 
-/* 首次：如果模板里已有精确 well，就先拉样品类型再加载数据 */
 {% if well %}
 (async ()=>{
   await populateSampleTypes("{{ well }}");
   await loadData();
+  updateSelCount();
 })();
 {% endif %}
-
 </script>
 
 <style>
@@ -616,7 +1184,11 @@ document.getElementById('sampleType').addEventListener('change', loadData);
   --accent:#2f6fed; --accent2:#2a3650; --danger:#d84e53;
 }
 .container { max-width: min(1600px, 100vw - 32px); margin: 0 auto; padding: 0 16px; }
-.topbar{display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin:16px 0;}
+
+/* 站点头 + 本页工具条 */
+header.topbar{ position: sticky; top: 0; z-index: 1000; }
+.topbar{ position: sticky; top: var(--headerH, 56px); z-index: 900; background:#0b1020; }
+
 .title{font-size:22px; font-weight:700;}
 .title small{font-weight:500; color:var(--muted); margin-left:6px;}
 .toolbar{display:flex; gap:12px; flex-wrap:wrap; align-items:center;}
@@ -625,58 +1197,73 @@ document.getElementById('sampleType').addEventListener('change', loadData);
 .btn.secondary{background:var(--accent2);}
 .btn.danger{background:var(--danger);}
 input[type="text"], input[type="number"], select.depth-select, #sampleType{
-  padding:6px 8px; border-radius:8px; background:#0f1420; color:var(--text); border:1px solid var(--line);
-}
-.pager{display:flex; align-items:center; gap:12px; margin:8px 0;}
-.table-wrapper { position: relative; }
-.table-wrapper::after{
-  content:""; position: absolute; top:0; right:0; width:18px; height:100%;
-  pointer-events:none; background: linear-gradient(to right, rgba(11,16,32,0), rgba(11,16,32,1));
+  padding:6px 8px; border-radius:8px; background:#0f1420; color: var(--text); border:1px solid var(--line);
 }
 
+.lock-label{user-select:none;}
+
+/* 分页 + 选中条（同一行） */
+.pager{display:flex; align-items:center; justify-content:space-between; gap:12px; margin:8px 0; position:sticky; top: calc(var(--headerH, 56px) + var(--subbarH, 48px)); z-index: 950; background:#0b1020; padding:6px 0;}
+.pager-left{display:flex; align-items:center; gap:10px;}
+.selectbar{display:flex; align-items:center; gap:12px;}
+.selectbar .select-all{display:flex; align-items:center; gap:6px; user-select:none;}
+.selectbar .divider{opacity:.6}
+
+/* 表格 */
+.table-wrapper { position: relative; }
 .grid{display:grid; gap:8px;}
 .cell{
   background:#0f1420; border:1px solid var(--line); border-radius:10px; padding:8px; min-height:152px;
   display:flex; align-items:center; justify-content:center; box-sizing:border-box; position:relative;
 }
-.cell.head{background:#0b1020; font-weight:600; position:sticky; top:0; z-index:5;}
-.lock-btn{position:absolute; right:8px; top:6px; background:transparent; border:0; cursor:pointer; font-size:16px; color:var(--text);}
+.cell.head{
+  background:#0b1020; font-weight:600;
+  /* 如需吸顶到两条工具条之下，可启用： */
+  /* position:sticky; top: calc(var(--headerH, 56px) + var(--subbarH, 48px)); z-index: 5; */
+  min-height: 36px;
+  padding: 4px 8px; align-items:center; justify-content:center;
+}
+.chk-all{font-size:13px; display:flex; align-items:center; gap:6px;}
+
+.select-cell{display:flex; align-items:center; justify-content:center;}
+.select-cell input[type="checkbox"]{width:18px; height:18px;}
+
+/* 缩略图 */
 .thumb{
-  width: 160px; height: 140px; overflow:hidden; border-radius:10px; position:relative;
+  width: 160px; min-height: 140px; overflow:hidden; border-radius:10px; position:relative;
   display:flex; flex-direction:column; justify-content:center; align-items:center; gap:6px;
 }
 .thumb img{max-width:100%; max-height:100%; object-fit:contain; display:block; border-radius:8px;}
 .noimg{color:#5f6c8f;}
 .badge{
-  position: absolute;
-  top: 6px;           /* ← 从顶部显示 */
-  right: 6px;
-  bottom: auto;       /* 取消底部定位 */
-  left: auto;
+  position: absolute; top: 6px; right: 6px;
   background: rgba(0,0,0,.55);
-  padding: 2px 6px;
-  border-radius: 6px;
-  font-size: 12px;
-  color: #fff;
-  z-index: 2;
-  pointer-events: none; /* 防止挡点击/拖动 */
+  padding: 2px 6px; border-radius: 6px; font-size: 12px; color: #fff; z-index: 2; pointer-events: none;
 }
-.caption{font-size:12px; color:#c6d2f5;}
 .caption.small{font-size:12px; color:#c6d2f5;}
-.depth-select{width:100%;  position: relative; z-index: 1; }
+.depth-select{width:100%;}
+
+/* 列面板 */
 .popover{position:absolute; margin-top:8px; background:#0f1420; border:1px solid var(--line); border-radius:10px; padding:12px; z-index:10; min-width:220px;}
 .popover.hidden{display:none;}
 .popover-title{font-weight:600; margin-bottom:8px;}
 .cols-wrap{display:grid; grid-template-columns: repeat(2, 1fr); gap:8px;}
 .col-item{display:flex; align-items:center; gap:8px;}
-.lock-label{user-select:none;}
 
-/* 井号候选列表 */
+/* 井号候选 */
 .well-list{display:flex; flex-direction:column; gap:8px; margin:8px 0 12px;}
-.well-item{padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#0f1420; color:var(--text); cursor:pointer; text-align:left;}
+.well-item{padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#0f1420; color:#fff; cursor:pointer; text-align:left;}
 .well-item:hover{border-color:#4a6cf3;}
 
-/* 大图预览：提高层级，避免被表头盖住 */
+/* 视图芯片（切/侧） */
+.pose-toggle { display:flex; gap:6px; margin-top:4px; flex-wrap:wrap; }
+.pose-chip {
+  padding:2px 8px; border:1px solid #2a3650; border-radius:999px; background:#0f1420;
+  color:#dbe2f7; font-size:12px; cursor:pointer; user-select:none;
+}
+.pose-chip.active { background:#2f6fed; border-color:#2f6fed; color:#fff; }
+
+/* 大图预览 & Loading */
 .zoom{position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:5000;}
 .zoom.hidden{display:none;}
 .zoom-backdrop{position:absolute; inset:0; background:rgba(0,0,0,.72);}
@@ -687,12 +1274,83 @@ input[type="text"], input[type="number"], select.depth-select, #sampleType{
   border:1px solid var(--line); background:#1b2335; color:#fff; font-size:20px; cursor:pointer;
 }
 
-/* 加载中遮罩 */
+/* 打印预览覆盖层 */
+.overlay{position:fixed; inset:0; z-index:6000; display:flex; align-items:center; justify-content:center;}
+.overlay.hidden{display:none;}
+.overlay-backdrop{position:absolute; inset:0; background:rgba(0,0,0,.65);}
+.overlay-panel{
+  position:relative; z-index:2; width:min(1200px, 96vw); max-height:92vh; overflow:auto;
+  background:#0f1420; border:1px solid var(--line); border-radius:12px; padding:12px;
+}
+.overlay-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;}
+.ov-title{font-weight:700; font-size:16px;}
+.ov-controls{display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end; margin-bottom:8px;}
+.ov-field{display:flex; gap:8px; align-items:center;}
+.ov-cats{display:flex; gap:10px; flex-wrap:wrap; max-width:100%;}
+.ov-cat-item{display:flex; align-items:center; gap:6px;}
+.ov-actions{display:flex; gap:10px; margin-left:auto;}
+
+body, .container, .toolbar, .pager, .cell, .popover, .overlay-panel, .well-item,
+.title, .field, label, #pageInfo, #selCount {
+  color: var(--text);
+}
+
+.print-canvas{
+  background:#0b1020; border:1px dashed var(--line); border-radius:10px; padding:12px;
+  display:grid; gap:12px;
+}
+/* —— 打印预览：一行=一个深度段，行内=所有类别 —— */
+.print-canvas{ display:flex; flex-direction:column; gap:12px; }
+.pv-row{ display:grid; gap:10px; }
+.pv-cell{ background:#0f1420; border:1px solid var(--line); border-radius:10px; padding:8px; display:flex; flex-direction:column; gap:6px; }
+.pv-cell img{ width:100%; height: var(--rowImgH, 160px); object-fit:contain; border-radius:8px; }
+.pv-cell .pv-cap{ font-size:12px; color:#c6d2f5; }
+.pb{ break-after: page; }
+
+/* Loading */
 .loading{position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; background:rgba(0,0,0,.35); z-index:4000;}
 .loading.hidden{display:none;}
 .spinner{width:42px; height:42px; border-radius:50%; border:4px solid rgba(255,255,255,.25); border-top-color:#fff; animation:spin 1s linear infinite;}
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-text{color:#fff; font-size:14px;}
+
+@media print {
+  /* 只打印预览画布 */
+  body * { visibility: hidden !important; }
+  #printCanvas, #printCanvas * { visibility: visible !important; }
+
+  /* 让画布参与正常文档流，方便分页 */
+  #printCanvas { position: static !important; display:block !important; width:100% !important; }
+
+  /* 覆盖层其它元素去掉 */
+  .overlay-backdrop, .overlay-head, .ov-controls { display:none !important; }
+  .overlay { position: static !important; background:#fff !important; }
+  .overlay-panel { width:auto !important; max-height:none !important; overflow:visible !important; padding:0 !important; border:none !important; background:#fff !important; }
+
+  /* 关键：页面边距交给我们自己控制 */
+  @page { size: A4 landscape; margin: 0; }
+}
+
+
+
+/* —— 打印页面容器（按毫米计量） —— */
+.print-page{
+  width: var(--pgWmm, 297mm);
+  height: var(--pgHmm, 210mm);
+  padding: var(--pgPadmm, 10mm);
+  box-sizing: border-box;
+  page-break-after: always;     /* 每个容器自然分页 */
+}
+.print-page:last-child{ page-break-after: auto; }
+
+/* 页内：一页恰好 N 行；行内 = 所有类别等分 */
+.pv-sheet{ display:flex; flex-direction:column; gap: var(--rowGapmm, 6mm); height:100%; }
+.pv-row{ display:grid; gap: var(--colGapmm, 6mm); grid-template-columns: var(--colTemplate, 1fr); }
+.pv-cell{ border:1px solid var(--line); border-radius:10px; padding:6px; display:flex; flex-direction:column; gap:4px; }
+.pv-cell img{ width:100%; height: var(--rowImgHmm, 35mm); object-fit:contain; border-radius:6px; }
+.pv-cap{ font-size:11px; color:#333; }  /* 打印时深色一点更清晰 */
+
+
 
 /* === 补回通用弹窗样式（关键） === */
 .modal{
@@ -718,5 +1376,4 @@ input[type="text"], input[type="number"], select.depth-select, #sampleType{
 .modal-actions{ display: flex; gap: 8px; justify-content: flex-end; }
 
 </style>
-
 {% endblock %}

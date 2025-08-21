@@ -44,20 +44,16 @@
   <span class="count">共 {{ filters.total_count }} 张</span>
 </form>
 
-<!-- 图片网格：显示所有图片的缩略图 -->
+<!-- 图片网格 -->
 <div class="grid">
   {% for it in items %}
   <div class="grid-card">
-    <!-- 图片链接：点击可查看原图，右键新开窗口 -->
-    <!-- 修正：模板端对 rel_path 做 urlencode，右键新开也不会 404 -->
-    <a href="/files/{{ it.rel_path|urlencode }}" target="_blank" title="{{ it.raw_name }}">
+    <a href="/files/{{ it.rel_path }}" target="_blank" title="{{ it.raw_name }}">
       <div class="grid-img-wrap">
-        <!-- 图片预览：使用 /preview/256/ 接口生成缩略图 -->
-        <!-- loading="lazy" 和 decoding="async" 优化加载性能 -->
-        <img src="/preview/256/{{ it.rel_path|urlencode }}" alt="" class="grid-img" loading="lazy" decoding="async">
+        <!-- 按需缩放预览：/preview/256/{rel_path} -->
+        <img src="/preview/256/{{ it.rel_path }}" alt="" class="grid-img" loading="lazy" decoding="async">
       </div>
     </a>
-    <!-- 图片元信息：井号、类别、样品类型、深度等 -->
     <div class="grid-meta">
       井：{{ it.well_name or "—" }}<br>
       类：{{ it.category or "—" }}<br>
@@ -74,7 +70,7 @@
   {% endfor %}
 </div>
 
-<!-- 分页导航：参数做 urlencode 避免中文/空值问题 -->
+<!-- 分页：参数做 urlencode，避免中文/空值问题 -->
 {% set qwell = (filters.well or '')|urlencode %}
 {% set qcat  = (filters.category or '')|urlencode %}
 {% set qstype= (filters.sample_type or '')|urlencode %}
@@ -95,20 +91,18 @@
   {% endif %}
 </div>
 
-<!-- 井号消歧弹窗（与分组页一致） -->
+<!-- 弹窗（井号候选） —— 与分组页一致 -->
 <div id="wellPicker" class="modal hidden">
-  <div class="modal-content">
-    <div class="modal-header">
-      <h3>选择井号</h3>
-      <button id="wellCancel" class="modal-close">×</button>
-    </div>
-    <div class="modal-body">
-      <p>找到多个匹配的井号，请选择：</p>
-      <div id="wellList" class="well-list"></div>
+  <div class="modal-card">
+    <div class="modal-msg">匹配到多口井，请选择：</div>
+    <div id="wellList" class="well-list"></div>
+    <div class="modal-actions">
+      <button id="wellCancel" class="btn secondary">取消</button>
     </div>
   </div>
 </div>
 
+<!-- 仅本页用到的样式，想放到全局 css 也行 -->
 <style>
   .grid{
     display:grid;
@@ -135,6 +129,7 @@
   .filters.card > div{ display:flex; flex-direction:column; gap:4px; }
   .pager{ display:flex; gap:12px; align-items:center; justify-content:center; margin:16px 0; }
 
+  /* 弹窗（与分组页共用风格变量） */
   .modal{position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; z-index:3000;}
   .modal.hidden{display:none;}
   .modal-card{background:#1f2633; border:1px solid #2a3650; border-radius:12px; padding:18px; width:420px;}
@@ -143,6 +138,7 @@
   .btn{padding:6px 12px; border-radius:8px; background:#2f6fed; color:#fff; border:0; cursor:pointer;}
   .btn.secondary{background:#2a3650; color:#dbe2f7;}
 
+  /* 井号候选列表（与分组页一致） */
   .well-list{display:flex; flex-direction:column; gap:8px; margin:8px 0 12px;}
   .well-item{padding:8px 10px; border-radius:8px; border:1px solid #2a3650; background:#0f1420; color:#dbe2f7; cursor:pointer; text-align:left;}
   .well-item:hover{border-color:#4a6cf3;}
@@ -150,13 +146,14 @@
 
 <script>
 (function(){
-  // 井号消歧功能
-  const wellPicker = document.getElementById('wellPicker');
-  const wellList = document.getElementById('wellList');
-  const wellCancel = document.getElementById('wellCancel');
-  const form = document.querySelector('form');
+  const form = document.querySelector('form.filters');
+  if (!form) return;
 
-  // 显示井号选择器
+  // 弹窗元素与 grouped 页统一
+  const wellPicker = document.getElementById('wellPicker');
+  const wellList   = document.getElementById('wellList');
+  const wellCancel = document.getElementById('wellCancel');
+
   function showWellPicker(candidates, onPick){
     wellList.innerHTML = '';
     candidates.forEach(w=>{
@@ -172,56 +169,45 @@
     });
     wellPicker.classList.remove('hidden');
   }
-  
-  // 隐藏井号选择器
   function hideWellPicker(){
     wellPicker.classList.add('hidden');
   }
   wellCancel?.addEventListener('click', hideWellPicker);
 
-  // 表单提交前处理：per_page 合法化（10~200），并做井号消歧
+  // 提交前：解析井号；多候选弹窗选择
   form.addEventListener('submit', async (e)=>{
-    // 验证每页显示数量
-    const per = form.querySelector('input[name="per_page"]');
-    if (per) {
-      const v = Math.max(10, Math.min(200, Number(per.value) || 50));
-      per.value = String(v);
-    }
-
-    // 井号消歧处理
     const wellInput = form.querySelector('input[name="well"]');
     const raw = (wellInput?.value || '').trim();
-    if (!raw) return; // 没填井名直接提交
+    if (!raw) return; // 没填井名直接正常提交
 
     e.preventDefault(); // 先消歧
     try {
-      // 调用API获取井号候选
       const r = await fetch('/api/wells?q=' + encodeURIComponent(raw));
       const data = await r.json();
 
       if (!data.candidates || data.candidates.length === 0) {
         alert('没有匹配到井号'); return;
       }
+      // 唯一候选：用 resolved 覆盖后提交
       if (data.resolved && data.candidates.length === 1) {
-        // 唯一匹配，直接使用
         wellInput.value = data.resolved;
         form.submit();
         return;
       }
-      // 多个匹配，显示选择器
+      // 多候选：弹窗选择，回填后提交
       showWellPicker(data.candidates, (picked)=>{
         wellInput.value = picked;
         form.submit();
       });
     } catch (err) {
+      // 解析失败就退化为原始提交
       console.error(err);
       form.submit();
     }
   });
 })();
 </script>
-
-<!-- 大图预览模态框：直接把已编码的 /files/ 路径替换成 /preview/1200/，避免二次编码 -->
+<!-- 大图预览 -->
 <div id="zoomModal" class="zoom hidden" tabindex="-1" aria-hidden="true" style="display:none">
   <div class="zoom-backdrop"></div>
   <div class="zoom-box">
@@ -229,52 +215,34 @@
     <button id="zoomClose" class="zoom-close" title="关闭">×</button>
   </div>
 </div>
-
-<!-- 大图预览样式 -->
 <style>
   .zoom{position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:4000;}
   .zoom.hidden{display:none;}
   .zoom-backdrop{position:absolute; inset:0; background:rgba(0,0,0,.72);}
   .zoom-box{position:relative; z-index:2; max-width:92vw; max-height:92vh; display:flex; align-items:center; justify-content:center;}
   #zoomImg{max-width:92vw; max-height:92vh; object-fit:contain; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.5);}
-  .zoom-close{position:absolute; top:-10px; right:-10px; width:36px; height:36px; border:1px solid #2a3650; background:#1b2335; color:#fff; font-size:20px; cursor:pointer;}
+  .zoom-close{position:absolute; top:-10px; right:-10px; width:36px; height:36px; border-radius:50%; border:1px solid #2a3650; background:#1b2335; color:#fff; font-size:20px; cursor:pointer;}
 </style>
-
-<!-- 大图预览交互逻辑 -->
 <script>
 (function(){
   const zoom = document.getElementById('zoomModal');
   const zoomImg = document.getElementById('zoomImg');
   const zoomClose = document.getElementById('zoomClose');
 
-  // 点击图片卡片时显示大图预览
   document.addEventListener('click', (e)=>{
     const a = e.target.closest('.grid-card a');
     if (!a) return;
     e.preventDefault();
-    // a.href 已经是 urlencode 过的 /files/...，直接替换前缀即可
-    const href = a.getAttribute('href');               // /files/encoded/path
-    const preview = href.replace(/^\/files\//,'/preview/1200/');  // 替换为1200px预览
-    zoomImg.src = preview;
+    const rel = a.getAttribute('href').replace(/^\/files\//,'');
+    const enc = rel.split('/').map(encodeURIComponent).join('/');
+    zoomImg.src = '/preview/1200/' + enc;
     zoom.classList.remove('hidden'); zoom.style.display='flex';
     zoom.focus();
   });
-  
-  // 隐藏预览
-  function hide(){ 
-    zoom.classList.add('hidden'); 
-    zoom.style.display='none'; 
-    zoomImg.src=''; 
-  }
-  
-  // 绑定关闭事件
+  function hide(){ zoom.classList.add('hidden'); zoom.style.display='none'; zoomImg.src=''; }
   zoomClose.addEventListener('click', hide);
-  zoom.addEventListener('click', (e)=>{ 
-    if (e.target===zoom || e.target.classList.contains('zoom-backdrop')) hide(); 
-  });
-  document.addEventListener('keydown', (e)=>{ 
-    if (!zoom.classList.contains('hidden') && e.key==='Escape') hide(); 
-  });
+  zoom.addEventListener('click', (e)=>{ if (e.target===zoom || e.target.classList.contains('zoom-backdrop')) hide(); });
+  document.addEventListener('keydown', (e)=>{ if (!zoom.classList.contains('hidden') && e.key==='Escape') hide(); });
 })();
 </script>
 

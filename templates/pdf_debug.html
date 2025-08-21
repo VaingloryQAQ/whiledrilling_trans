@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="pdf-debug-container">
+    <h2>PDF.js 调试页面</h2>
+    
+    <div class="debug-section">
+        <h3>1. PDF.js 状态检查</h3>
+        <div id="pdfjsStatus"></div>
+    </div>
+    
+    <div class="debug-section">
+        <h3>2. 测试PDF文件加载</h3>
+        <input type="file" id="pdfFile" accept=".pdf" />
+        <button id="testLocalPdf">测试本地PDF</button>
+        <div id="localPdfResult"></div>
+    </div>
+    
+    <div class="debug-section">
+        <h3>3. 测试服务器PDF</h3>
+        <input type="text" id="pdfId" placeholder="输入PDF ID (如: abc123)" />
+        <button id="testServerPdf">测试服务器PDF</button>
+        <div id="serverPdfResult"></div>
+    </div>
+    
+    <div class="debug-section">
+        <h3>4. 网络请求测试</h3>
+        <button id="testNetwork">测试网络连接</button>
+        <div id="networkResult"></div>
+    </div>
+</div>
+
+<script>
+// 检查PDF.js状态
+function checkPdfjsStatus() {
+    const statusDiv = document.getElementById('pdfjsStatus');
+    
+    if (typeof pdfjsLib === 'undefined') {
+        statusDiv.innerHTML = '<p style="color: red;">❌ PDF.js 未加载</p>';
+        return false;
+    }
+    
+    statusDiv.innerHTML = `
+        <p style="color: green;">✅ PDF.js 已加载</p>
+        <p>版本: ${pdfjsLib.version}</p>
+        <p>Worker: ${pdfjsLib.GlobalWorkerOptions.workerSrc}</p>
+    `;
+    return true;
+}
+
+// 测试本地PDF文件
+document.getElementById('testLocalPdf').addEventListener('click', async function() {
+    const fileInput = document.getElementById('pdfFile');
+    const resultDiv = document.getElementById('localPdfResult');
+    const file = fileInput.files[0];
+    
+    if (!file) {
+        resultDiv.innerHTML = '<p style="color: red;">请选择PDF文件</p>';
+        return;
+    }
+    
+    try {
+        resultDiv.innerHTML = '<p>正在加载本地PDF...</p>';
+        
+        const arrayBuffer = await file.arrayBuffer();
+        const loadingTask = pdfjsLib.getDocument({data: arrayBuffer});
+        const pdf = await loadingTask.promise;
+        
+        resultDiv.innerHTML = `
+            <p style="color: green;">✅ 本地PDF加载成功</p>
+            <p>页数: ${pdf.numPages}</p>
+            <p>文件大小: ${(file.size / 1024).toFixed(2)} KB</p>
+        `;
+        
+        // 尝试渲染第一页
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({scale: 1.0});
+        
+        resultDiv.innerHTML += `
+            <p>第一页尺寸: ${viewport.width.toFixed(2)} x ${viewport.height.toFixed(2)} pt</p>
+        `;
+        
+    } catch (error) {
+        resultDiv.innerHTML = `<p style="color: red;">❌ 本地PDF加载失败: ${error.message}</p>`;
+        console.error('本地PDF加载错误:', error);
+    }
+});
+
+// 测试服务器PDF
+document.getElementById('testServerPdf').addEventListener('click', async function() {
+    const pdfId = document.getElementById('pdfId').value.trim();
+    const resultDiv = document.getElementById('serverPdfResult');
+    
+    if (!pdfId) {
+        resultDiv.innerHTML = '<p style="color: red;">请输入PDF ID</p>';
+        return;
+    }
+    
+    try {
+        resultDiv.innerHTML = '<p>正在加载服务器PDF...</p>';
+        
+        const pdfUrl = `/api/logpdf/${pdfId}.pdf`;
+        console.log('尝试加载PDF URL:', pdfUrl);
+        
+        // 先测试网络请求
+        const response = await fetch(pdfUrl);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        resultDiv.innerHTML = '<p>网络请求成功，正在加载PDF...</p>';
+        
+        const loadingTask = pdfjsLib.getDocument(pdfUrl);
+        const pdf = await loadingTask.promise;
+        
+        resultDiv.innerHTML = `
+            <p style="color: green;">✅ 服务器PDF加载成功</p>
+            <p>页数: ${pdf.numPages}</p>
+            <p>URL: ${pdfUrl}</p>
+        `;
+        
+        // 尝试渲染第一页
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({scale: 1.0});
+        
+        resultDiv.innerHTML += `
+            <p>第一页尺寸: ${viewport.width.toFixed(2)} x ${viewport.height.toFixed(2)} pt</p>
+        `;
+        
+    } catch (error) {
+        resultDiv.innerHTML = `<p style="color: red;">❌ 服务器PDF加载失败: ${error.message}</p>`;
+        console.error('服务器PDF加载错误:', error);
+    }
+});
+
+// 测试网络连接
+document.getElementById('testNetwork').addEventListener('click', async function() {
+    const resultDiv = document.getElementById('networkResult');
+    
+    try {
+        resultDiv.innerHTML = '<p>正在测试网络连接...</p>';
+        
+        // 测试基本网络连接
+        const response = await fetch('/api/logpdf/test', { 
+            method: 'HEAD',
+            cache: 'no-cache'
+        });
+        
+        resultDiv.innerHTML = `
+            <p style="color: green;">✅ 网络连接正常</p>
+            <p>状态: ${response.status}</p>
+        `;
+        
+    } catch (error) {
+        resultDiv.innerHTML = `<p style="color: red;">❌ 网络连接失败: ${error.message}</p>`;
+        console.error('网络测试错误:', error);
+    }
+});
+
+// 页面加载时检查PDF.js状态
+document.addEventListener('DOMContentLoaded', function() {
+    checkPdfjsStatus();
+});
+</script>
+
+<style>
+.pdf-debug-container {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+.debug-section {
+    margin: 20px 0;
+    padding: 20px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    background-color: #f9f9f9;
+}
+
+.debug-section h3 {
+    margin-top: 0;
+    color: #333;
+}
+
+.debug-section input[type="file"],
+.debug-section input[type="text"] {
+    margin-right: 10px;
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
+
+.debug-section button {
+    padding: 8px 16px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-right: 10px;
+}
+
+.debug-section button:hover {
+    background-color: #0056b3;
+}
+
+#pdfjsStatus,
+#localPdfResult,
+#serverPdfResult,
+#networkResult {
+    margin-top: 10px;
+    padding: 10px;
+    background-color: white;
+    border-radius: 4px;
+    border: 1px solid #eee;
+}
+</style>
+{% endblock %}

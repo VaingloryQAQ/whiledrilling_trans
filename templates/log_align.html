@@ -1,0 +1,404 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container">
+  <div class="topbar">
+    <div class="title">录井 PDF 联动（上传 PDF → 自动识别井号 → 只联动同井图片）</div>
+    <div class="toolbar">
+      <input id="pdfFile" type="file" accept="application/pdf">
+      <button id="btnIngest" class="btn">上传并识别</button>
+
+      <span id="wellBox" style="display:none; gap:8px; align-items:center;">
+        <label>井号</label>
+        <input id="wellInput" type="text" style="width:220px">
+        <button id="btnBind" class="btn secondary">绑定并加载图片</button>
+      </span>
+
+      <button id="btnDebug" class="btn light" title="在 PDF 上画 10m 网格线">自检刻度</button>
+      <button id="btnProbe" class="btn light" title="鼠标悬停显示反算深度">探针</button>
+      <button id="btnCalib" class="btn light" style="display:none;" title="缺页或不准时，两点标定">标定模式</button>
+    </div>
+  </div>
+
+  <div id="scroller" class="scroller"></div>
+</div>
+
+<!-- 大图预览 -->
+<div id="zoomModal" class="zoom hidden">
+  <div class="zoom-backdrop"></div>
+  <div class="zoom-box">
+    <img id="zoomImg" alt="预览">
+    <button id="zoomClose" class="zoom-close">×</button>
+  </div>
+</div>
+
+<!-- PDF.js 已在 base.html 中通过 CDN 引入 -->
+
+<script>
+// =================== PDF.js 就绪（CDN） ===================
+let _pdfReadyPromise=null;
+function waitForPdfjs(){
+  if (_pdfReadyPromise) return _pdfReadyPromise;
+  _pdfReadyPromise = new Promise((resolve, reject)=>{
+    function ready(){
+      try{
+        // PDF.js worker 已在 base.html 中配置
+        resolve();
+      }catch(e){ reject(e); }
+    }
+    if (window.pdfjsLib) ready();
+    else {
+      reject(new Error('PDF.js 未加载'));
+    }
+  });
+  return _pdfReadyPromise;
+}
+
+// =================== 工具函数 ===================
+function el(tag, attrs={}, kids=[]){
+  const e=document.createElement(tag);
+  for (const [k,v] of Object.entries(attrs)){
+    if (k==='class') e.className=v;
+    else if (k==='html') e.innerHTML=v;
+    else e.setAttribute(k,v);
+  }
+  (Array.isArray(kids)?kids:[kids]).forEach(c=> e.appendChild(typeof c==='string'?document.createTextNode(c):c));
+  return e;
+}
+function normalizeWell(x){
+  return (x||'').replace(/井$/,'').replace(/[－—–‒―]/g,'-')
+                .replace(/[Ａ-Ｚａ-ｚ０-９]/g, s=>String.fromCharCode(s.charCodeAt(0)-65248))
+                .toUpperCase().replace(/\s+/g,'');
+}
+function getRelPath(obj){
+  if (!obj) return '';
+  if (obj.rel_path) return obj.rel_path;
+  if (obj.file_url && obj.file_url.startsWith('/files/')) {
+    const raw = obj.file_url.slice('/files/'.length);
+    try { return decodeURIComponent(raw); } catch { return raw; }
+  }
+  return '';
+}
+function previewUrl(obj, maxSide){
+  const rel = getRelPath(obj);
+  if (rel) {
+    const enc = rel.split('/').map(encodeURIComponent).join('/');
+    return `/preview/${maxSide}/${enc}`;
+  }
+  return obj.file_url || '';
+}
+
+// =================== 全局状态 ===================
+const state = {
+  pdf_id: null,
+  pdf_url: null,
+  depth_map: [],        // [{page,a,b,unit,depth_min,depth_max}]
+  pages_meta: [],       // [{index,width_pt,height_pt}]
+  pages: [],            // 每页渲染对象
+  well: null,
+  grouped: null,
+  missing_pages: [],    // [pageIndex...]
+  probeOn: false
+};
+
+// =================== 上传并识别 ===================
+document.getElementById('btnIngest').onclick = async ()=>{
+  const f = document.getElementById('pdfFile').files?.[0];
+  if (!f) return alert('请选择PDF');
+  const fd = new FormData(); fd.append('file', f);
+  const res = await fetch('/api/logpdf/ingest', { method:'POST', body: fd });
+  if (!res.ok){
+    const t=await res.text(); return alert('解析失败：'+t);
+  }
+  const data = await res.json();
+  state.pdf_id     = data.pdf_id;
+  state.pdf_url    = data.file_url;
+  state.depth_map  = data.depth_map || [];
+  state.pages_meta = data.pages_meta || [];
+  state.missing_pages = data.missing_pages || [];
+  state.well       = (data.well || '').trim();
+
+  // 显示井号输入框
+  document.getElementById('wellInput').value = state.well;
+  document.getElementById('wellBox').style.display='inline-flex';
+  document.getElementById('btnCalib').style.display = state.missing_pages.length ? 'inline-block' : 'none';
+
+  // 打印每页策略信息，便于对照“深度”列是否锚定成功
+  if (data.strategy_info) {
+    console.log('Depth mapping strategy detail per page:');
+    console.table(data.strategy_info.pages || []);
+    const msg = data.strategy_info.message || `完成 ${state.depth_map.length}/${state.pages_meta.length} 页`;
+    alert(`PDF解析完成！\n${msg}\n井号: ${state.well || '未识别'}`);
+  }
+};
+
+// =================== 绑定井号并加载同井图片 ===================
+document.getElementById('btnBind').onclick = async ()=>{
+  const w = normalizeWell(document.getElementById('wellInput').value);
+  if (!w) return alert('井号不能为空');
+  state.well = w;
+
+  try { await waitForPdfjs(); }
+  catch(e){ console.error('PDF.js 加载失败',e); return alert('PDF内核加载失败，请检查 /static/pdfjs'); }
+
+  await renderPdf(state.pdf_url, state.depth_map);
+
+  // 仅同井加载
+  const url = new URL('/api/grouped-data', location.origin);
+  url.searchParams.set('well', state.well);
+  const resp = await fetch(url);
+  state.grouped = await resp.json();
+  const gw = normalizeWell(state.grouped?.well || '');
+  if (gw && gw !== state.well){
+    alert(`返回数据井号(${gw})与PDF井号(${state.well})不一致，已拦截。`);
+    return;
+  }
+  mountAll(state.grouped);
+};
+
+// =================== 渲染 PDF（无映射也渲染，便于标定） ===================
+async function renderPdf(pdfUrl, depthMap){
+  const scroller = document.getElementById('scroller');
+  scroller.innerHTML=''; state.pages = [];
+  const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
+  const mapByPage = new Map((depthMap||[]).map(m=> [m.page, m]));
+
+  for (let i=1; i<=pdf.numPages; i++){
+    const page = await pdf.getPage(i);
+    const scale = 1.5;
+    const viewport = page.getViewport({ scale });
+    const row = el('div',{class:'page-row'});
+    const left = el('div',{class:'page-left'});
+    const right= el('div',{class:'page-right'});
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(viewport.width);
+    canvas.height= Math.floor(viewport.height);
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    const overlay = el('div',{class:'overlay'});
+
+    // 探针：悬浮反算深度
+    canvas.addEventListener('mousemove', (e)=>{
+      if (!state.probeOn) return;
+      const pg = pageInfo(i-1);
+      if (!pg || pg.a==null) { canvas.title='(本页未建映射)'; return; }
+      const y_px = e.offsetY;
+      const y_pdf = (pg.viewportHeightPx - y_px) / pg.pxPerUnit;
+      const depth = (y_pdf - pg.b) / pg.a;
+      canvas.title = `Page ${pg.pageIndex+1} | y=${y_px.toFixed(1)}px → ≈${depth.toFixed(2)} m`;
+    });
+
+    left.appendChild(canvas); left.appendChild(overlay);
+    right.style.height = Math.ceil(canvas.height)+'px';
+    row.appendChild(left); row.appendChild(right); scroller.appendChild(row);
+
+    const m = mapByPage.get(i-1) || null;
+    const pxPerUnit = m && m.unit === 'px' ? 1.0 : viewport.scale;
+
+    state.pages.push({
+      pageIndex: i-1,
+      a: m?.a ?? null,
+      b: m?.b ?? null,
+      depthMin: m?.depth_min ?? null,
+      depthMax: m?.depth_max ?? null,
+      pxPerUnit, viewportHeightPx: canvas.height,
+      overlay, right, row, canvas
+    });
+  }
+}
+function pageInfo(pIndex){ return state.pages.find(p=>p.pageIndex===pIndex); }
+function depthToYpx(pg, depth){
+  const y_map = pg.a * depth + pg.b;                  // 单位: pt
+  return pg.viewportHeightPx - y_map * pg.pxPerUnit;  // 像素（顶部为0向下）
+}
+
+// =================== 把所有段卡片挂到对应页（纵向按中心深度定位） ===================
+function mountAll(grouped){
+  const segs = grouped.segments || [];
+  const imagesBySeg = grouped.imagesBySegment || {};
+  const cats = grouped.categories || [];
+  const orderedCats = ['荧光扫描', ...cats.filter(c=>c!=='荧光扫描')];
+
+  for (const seg of segs){
+    const center = (typeof seg.center==='number') ? seg.center
+                   : ((seg.start_depth + seg.end_depth)/2);
+
+    // 找页（优先范围包含，否则就近）
+    let pg = state.pages.find(p => p.a!=null && center >= p.depthMin-1e-6 && center <= p.depthMax+1e-6);
+    if (!pg){
+      pg = state.pages.reduce((best,p)=>{
+        if (p.a==null) return best;
+        const d = Math.min(Math.abs(center-p.depthMin), Math.abs(center-p.depthMax));
+        return (!best || d<best.d)? {p,d}:best;
+      }, null)?.p;
+      if (!pg) continue;
+    }
+    const y = Math.max(8, Math.min(pg.viewportHeightPx-8, depthToYpx(pg, center)));
+
+    const card = el('div',{class:'card'});
+    card.style.top = y + 'px';
+    card.innerHTML = `
+      <div style="font-weight:700">${seg.label || (center?.toFixed?.(2) + ' m') || seg.id}</div>
+      <div class="thumbs"></div>
+    `;
+    const thumbs = card.querySelector('.thumbs');
+
+    const perCat = imagesBySeg[seg.id] || {};
+    for (const cat of orderedCats){
+      const pack = perCat[cat] || [];
+      if (!pack.length) continue;
+      thumbs.appendChild(el('div',{class:'cat-title', html: cat}));
+      const box = el('div',{}); box.style.cssText='display:flex;flex-wrap:wrap;gap:6px;';
+      pack.forEach(it=>{
+        const img = el('img',{src: previewUrl(it, 200), loading:'lazy', decoding:'async', title: (it.depth_label||'')});
+        img.style.cssText='width:96px;height:72px;object-fit:cover;border-radius:6px;background:#0b1020;';
+        img.onclick = ()=> showZoom(it);
+        box.appendChild(img);
+      });
+      thumbs.appendChild(box);
+    }
+
+    card.onclick = ()=> highlight(pg, center);
+    pg.right.appendChild(card);
+  }
+}
+
+// =================== 高亮横线并滚动居中 ===================
+function highlight(pg, depth){
+  const y = depthToYpx(pg, depth);
+  pg.overlay.innerHTML='';
+  const line = el('div',{class:'marker'}); line.style.top = y + 'px';
+  pg.overlay.appendChild(line);
+  document.getElementById('scroller')
+    .scrollTo({ top: pg.row.offsetTop + y - 300, behavior:'smooth' });
+}
+
+// =================== 自检刻度：画 10m 网格线 ===================
+document.getElementById('btnDebug').onclick = ()=>{
+  for (const pg of state.pages){
+    const ov = pg.overlay; ov.innerHTML='';
+    if (pg.a==null) continue;
+    const step = 10;
+    for (let d = Math.ceil(pg.depthMin/step)*step; d <= pg.depthMax; d+=step){
+      const y = depthToYpx(pg, d);
+      const l = el('div',{}); l.style.cssText=`position:absolute;left:0;right:0;height:1px;background:rgba(56,189,248,.85);top:${y}px`;
+      const tag = el('div',{}); tag.textContent = d.toFixed(0);
+      tag.style.cssText=`position:absolute;right:6px;top:${y-8}px;font:12px/1 sans-serif;color:#38bdf8;`;
+      ov.appendChild(l); ov.appendChild(tag);
+    }
+  }
+};
+
+// =================== 探针模式开关 ===================
+document.getElementById('btnProbe').onclick = ()=>{
+  state.probeOn = !state.probeOn;
+  alert(state.probeOn ? '探针已开启：把鼠标移到 PDF 左侧刻度附近查看深度' : '探针已关闭');
+};
+
+// =================== 缺页两点标定 ===================
+document.getElementById('btnCalib').onclick = ()=>{
+  if (!state.missing_pages.length) { alert('当前没有缺失映射的页'); return; }
+  alert('标定模式：在缺页的 PDF 左侧依次点击两条已知刻度线（如 500m 与 600m），随后输入对应深度。');
+
+  for (const pIdx of state.missing_pages.slice()){
+    const pg = pageInfo(pIdx);
+    if (!pg) continue;
+    enableTwoPointCalibration(pg);
+  }
+};
+function enableTwoPointCalibration(pg){
+  const clicks = [];
+  const handler = async (e)=>{
+    const y_px = e.offsetY;
+    clicks.push(y_px);
+    const dot = document.createElement('div');
+    dot.style.cssText = `position:absolute;left:0;right:0;height:2px;background:#f59e0b;top:${y_px}px;`;
+    pg.overlay.appendChild(dot);
+
+    if (clicks.length === 2){
+      pg.overlay.removeEventListener('click', handler);
+      const d1 = parseFloat(prompt('请输入第一个点对应的深度(米)：') || '');
+      const d2 = parseFloat(prompt('请输入第二个点对应的深度(米)：') || '');
+      if (!isFinite(d1) || !isFinite(d2) || d1===d2){
+        alert('深度输入不合法，标定取消。');
+        pg.overlay.innerHTML=''; return;
+      }
+      // y_px → y_pdf(pt)
+      const H = pg.viewportHeightPx, s = pg.pxPerUnit;
+      const y1_pdf = (H - clicks[0]) / s;
+      const y2_pdf = (H - clicks[1]) / s;
+
+      // 本地更新 a,b + 范围
+      const a = ( (y1_pdf - y2_pdf) / (d1 - d2) );
+      const b = y1_pdf - a * d1;
+      pg.a = a; pg.b = b;
+      pg.depthMin = Math.min(d1, d2); pg.depthMax = Math.max(d1, d2);
+      pg.overlay.innerHTML='';
+      state.missing_pages = state.missing_pages.filter(x=> x!==pg.pageIndex);
+
+      // 写回后端
+      if (state.pdf_id){
+        fetch('/api/logpdf/calibrate', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ pdf_id: state.pdf_id, page: pg.pageIndex,
+                  pairs:[{y_pdf:y1_pdf, depth:d1},{y_pdf:y2_pdf, depth:d2}] })
+        }).catch(()=>{});
+      }
+
+      // 重新画自检线帮助确认
+      document.getElementById('btnDebug').click();
+    }
+  };
+  pg.overlay.addEventListener('click', handler);
+}
+
+// =================== 预览大图 ===================
+const zoom = document.getElementById('zoomModal');
+const zoomImg = document.getElementById('zoomImg');
+document.getElementById('zoomClose').onclick = ()=> hideZoom();
+zoom.addEventListener('click',(e)=>{ if (e.target===zoom || e.target.classList.contains('zoom-backdrop')) hideZoom(); });
+document.addEventListener('keydown',(e)=>{ if (e.key==='Escape') hideZoom(); });
+function showZoom(item){
+  const rel = getRelPath(item);
+  zoomImg.src = rel ? `/preview/1200/${rel.split('/').map(encodeURIComponent).join('/')}` : (item.file_url||'');
+  zoom.classList.remove('hidden');
+}
+function hideZoom(){ zoom.classList.add('hidden'); zoomImg.src=''; }
+</script>
+
+<style>
+:root{ --bg:#0b1020; --card:#111827; --line:#2a3650; --text:#e5e7eb; --muted:#9ca3af; --accent:#3b82f6; }
+.container{ max-width:min(1600px, 100vw - 32px); margin:0 auto; padding:0 16px; }
+.topbar{ position: sticky; top: var(--headerH, 56px); background:var(--bg); z-index: 10; padding:10px 0; }
+.title{ font-weight:700; margin-bottom:6px; color:var(--text); }
+.toolbar{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; color:var(--text); }
+label{ color:var(--muted); }
+input[type="text"], input[type="file"]{ padding:6px 8px; border-radius:8px; background:#0f1420; color:var(--text); border:1px solid var(--line); }
+.btn{ padding:6px 12px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+.btn.secondary{ background:#1f2937; }
+.btn.light{ background:#334155; }
+
+.scroller{ height: calc(100vh - 140px); overflow:auto; background:#0b1020; border:1px solid var(--line); border-radius:10px; }
+.page-row{ display:grid; grid-template-columns: 1fr 380px; gap:12px; padding:12px; align-items:flex-start; }
+.page-left, .page-right{ position:relative; background:#0f1420; border:1px solid var(--line); border-radius:10px; }
+.page-left canvas{ display:block; width:100%; height:auto; border-radius:10px; }
+.overlay{ position:absolute; inset:0; pointer-events:auto; } /* 标定时需要 click */
+.marker{ position:absolute; left:0; right:0; height:2px; background:#ef4444; opacity:.95; box-shadow:0 0 0 1px rgba(239,68,68,.25); }
+
+.card{
+  position:absolute; left:8px; right:8px; transform: translateY(-50%);
+  background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:10px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.25);
+}
+.card .thumbs{ display:flex; flex-direction:column; gap:6px; margin-top:6px; }
+.cat-title{ font-weight:600; color:#cbd5e1; margin-top:4px; }
+
+.zoom{position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:5000;}
+.zoom.hidden{display:none;}
+.zoom-backdrop{position:absolute; inset:0; background:rgba(0,0,0,.72);}
+.zoom-box{position:relative; z-index:2; max-width:92vw; max-height:92vh; display:flex; align-items:center; justify-content:center;}
+#zoomImg{max-width:92vw; max-height:92vh; object-fit:contain; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.5);}
+.zoom-close{
+  position:absolute; top:-10px; right:-10px; width:36px; height:36px; border-radius:50%;
+  border:1px solid var(--line); background:#1b2335; color:#fff; font-size:20px; cursor:pointer;
+}
+</style>
+{% endblock %}
