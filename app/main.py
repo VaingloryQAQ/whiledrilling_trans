@@ -20,7 +20,6 @@ from .config import BASE_DIR, DATA_DIR, UPLOADS_DIR, EXTRACTED_DIR, THUMBS_DIR, 
 from .models import Image
 from .ingest import init_db, unzip, ingest_dir, DB_PATH
 from .grouping import build_grouped_data
-from .database import get_db_session, optimized_queries
 
 import io
 import os
@@ -35,27 +34,23 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, R
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
-from .middleware import setup_middleware, AppException, handle_app_exception
 
 from .extract import extract_archive
 
+from .routes_logpdf import router as logpdf_router
+
 app = FastAPI(title="Drill Image Web")
-
-# 设置中间件
-setup_middleware(app)
-
-# 添加异常处理器
-app.add_exception_handler(AppException, handle_app_exception)
-
-# 简单内存 LRU（按需可换 disk cache）
-_PREVIEW_CACHE = {}  # key -> bytes
-_PREVIEW_CACHE_MAX = 128
+# 图片预览缓存配置
+_PREVIEW_CACHE = {}  # 内存缓存：key -> bytes
+_PREVIEW_CACHE_MAX = 128  # 最大缓存条目数
 
 
 # 静态目录挂载（保留一次即可）
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 app.mount("/files", StaticFiles(directory=EXTRACTED_DIR), name="files")
 app.mount("/thumbs", StaticFiles(directory=THUMBS_DIR), name="thumbs")
+
+app.include_router(logpdf_router)
 
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -65,13 +60,11 @@ engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
 init_db()
 
 
+#uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+
 def get_sess():
-    """获取数据库会话（使用优化版本）"""
-    session = get_db_session()
-    try:
-        yield session
-    finally:
-        session.close()
+    with Session(engine) as sess:
+        yield sess
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -129,33 +122,19 @@ def _process_upload_job(job_id: str, saved_path: Path) -> None:
         job.update({"status": "error", "message": f"{type(e).__name__}: {e}", "current": ""})
 
 @app.post("/api/upload")
-async def api_upload(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...), request: Request):
-    """上传ZIP包，后台解压并导入"""
-    # 速率限制检查
-    client_ip = request.client.host
-    if not rate_limiter.is_allowed(client_ip):
-        raise HTTPException(429, "上传请求过于频繁，请稍后再试")
-    
+async def api_upload(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
     if not files:
         raise HTTPException(status_code=400, detail="No files")
-    
-    # 验证上传文件
-    for file in files:
-        is_safe, error_msg = SecurityValidator.validate_upload_file(file)
-        if not is_safe:
-            raise HTTPException(status_code=400, detail=f"文件验证失败: {error_msg}")
-    
     results = []
     for uf in files:
         job_id = uuid.uuid4().hex
-        # 使用安全文件名生成
-        safe_filename = SecurityValidator.generate_safe_filename(uf.filename or f"upload-{job_id}.zip")
-        dst = UPLOADS_DIR / safe_filename
+        fname = _safe_filename(uf.filename or f"upload-{job_id}.zip")
+        dst = UPLOADS_DIR / fname    # ★ 用配置里的 UPLOADS_DIR
         content = await uf.read()
         dst.write_bytes(content)
-        JOBS[job_id] = {"status":"pending","done":0,"total":0,"current":"","file":safe_filename,"message":""}
+        JOBS[job_id] = {"status":"pending","done":0,"total":0,"current":"","file":fname,"message":""}
         background_tasks.add_task(_process_upload_job, job_id, dst)
-        results.append({"job_id": job_id, "filename": safe_filename})
+        results.append({"job_id": job_id, "filename": fname})
     return {"jobs": results}
 
 @app.get("/api/upload/status/{job_id}")
@@ -174,78 +153,99 @@ def api_upload_status(job_id: str):
 PREVIEW_CACHE_DIR = BASE_DIR / "data" / "cache" / "previews"
 PREVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-from .security import SecurityValidator, rate_limiter
-
 def _safe_join_under(root: Path, rel: str) -> Path:
-    """使用安全模块验证路径"""
-    return SecurityValidator.validate_file_path(rel, root)
+    """
+    安全路径拼接函数
+    确保拼接后的路径不会超出根目录范围，防止路径遍历攻击
+    """
+    p = (root / rel).resolve()
+    root = root.resolve()
+    if not str(p).startswith(str(root)):
+        raise HTTPException(status_code=400, detail="invalid path")
+    return p
 
 def _preview_cache_path(rel: str, max_side: int) -> Path:
-    # 缓存也保留目录结构，最后统一存 jpg
+    """
+    生成预览图片缓存路径
+    缓存保留原目录结构，统一存储为jpg格式
+    """
     return (PREVIEW_CACHE_DIR / str(max_side) / rel).with_suffix(".jpg")
 
 @app.get("/preview/{max_side}/{rel_path:path}")
-def preview_image(max_side: int, rel_path: str, request: Request):
+def preview_image(max_side: int, rel_path: str):
     """
-    动态缩放原图（最长边=max_side），磁盘缓存。
+    图片预览接口 - 动态缩放原图并磁盘缓存
+    
+    功能：
+    1. 根据max_side参数动态缩放图片（最长边不超过指定像素）
+    2. 使用磁盘缓存提高性能，避免重复处理
+    3. 支持缓存过期检查，源图更新时自动重建缓存
+    
+    参数：
+    - max_side: 图片最长边的像素数（1-4000）
+    - rel_path: 相对于EXTRACTED_DIR的图片路径
+    
     使用方式：<img src="/preview/256/{{ item.rel_path }}">
     """
-    # 速率限制检查
-    client_ip = request.client.host
-    if not rate_limiter.is_allowed(client_ip):
-        raise HTTPException(429, "请求过于频繁，请稍后再试")
-    
     # 参数验证
     if max_side <= 0 or max_side > 4000:
         raise HTTPException(400, "invalid max_side")
 
-    # 安全路径验证
+    # 安全路径解析
     src = _safe_join_under(EXTRACTED_DIR, rel_path)
     if not src.exists() or not src.is_file():
         raise HTTPException(404, "file not found")
 
+    # 生成缓存路径
     cache = _preview_cache_path(rel_path, max_side)
     cache.parent.mkdir(parents=True, exist_ok=True)
 
-    # 缓存是否过期：源图更新则重建
+    # 缓存过期检查：源图更新则重建缓存
     try:
         src_mtime = src.stat().st_mtime_ns
         if cache.exists():
             if cache.stat().st_mtime_ns >= src_mtime:
-                # 直接返回缓存
+                # 缓存有效，直接返回
                 etag = hashlib.md5(f"{cache.stat().st_mtime_ns}-{cache.stat().st_size}".encode()).hexdigest()
                 headers = {
-                    "Cache-Control": "public, max-age=2592000",
+                    "Cache-Control": "public, max-age=2592000",  # 30天缓存
                     "ETag": etag
                 }
                 return FileResponse(cache, media_type="image/jpeg", headers=headers)
     except Exception:
         pass
 
-    # 生成并写缓存
+    # 生成预览图片并写入缓存
     try:
         with PILImage.open(src) as im:
+            # 转换为RGB模式，确保兼容性
             im = im.convert("RGB")
             w, h = im.size
+            
+            # 按比例缩放图片
             if max(w, h) > max_side:
                 if w >= h:
+                    # 横向图片：以宽度为基准缩放
                     nh = int(h * max_side / w)
                     nw = max_side
                 else:
+                    # 纵向图片：以高度为基准缩放
                     nw = int(w * max_side / h)
                     nh = max_side
                 im = im.resize((nw, nh), PILImage.LANCZOS)
+            
             # 保存到缓存（先临时文件后原子替换，避免并发读到半文件）
             tmp = cache.with_suffix(".tmp")
             tmp.parent.mkdir(parents=True, exist_ok=True)
             im.save(tmp, format="JPEG", quality=82, optimize=True)
-            tmp.replace(cache)
+            tmp.replace(cache)  # 原子替换，确保文件完整性
     except Exception as e:
         raise HTTPException(500, f"preview failed: {e}")
 
+    # 返回生成的预览图片
     etag = hashlib.md5(f"{cache.stat().st_mtime_ns}-{cache.stat().st_size}".encode()).hexdigest()
     headers = {
-        "Cache-Control": "public, max-age=2592000",
+        "Cache-Control": "public, max-age=2592000",  # 30天缓存
         "ETag": etag
     }
     return FileResponse(cache, media_type="image/jpeg", headers=headers)
@@ -254,56 +254,87 @@ def preview_image(max_side: int, rel_path: str, request: Request):
 def upload_page(request: Request):
     return templates.TemplateResponse("upload.html", {"request": request})
 
+@app.get("/pdf-debug", response_class=HTMLResponse)
+def pdf_debug_page(request: Request):
+    return templates.TemplateResponse("pdf_debug.html", {"request": request})
+
 def _best_preview_format(accept_header: str) -> str:
+    """
+    根据浏览器支持的格式选择最佳图片格式
+    优先使用更现代的格式（AVIF > WEBP > JPEG）
+    """
     a = accept_header or ""
     if "image/avif" in a:
-        return "AVIF"
+        return "AVIF"  # 最新格式，压缩率最高
     if "image/webp" in a:
-        return "WEBP"
-    return "JPEG"
+        return "WEBP"  # 现代格式，广泛支持
+    return "JPEG"  # 兼容性最好的格式
 
 @app.get("/preview/{size}/{path:path}")
 def preview_image(size: int, path: str, request: Request):
-    """按需生成缩略图，并做强缓存/协商（ETag/Last-Modified/Vary: Accept）"""
+    """
+    增强版图片预览接口 - 支持多种格式和内存缓存
+    
+    功能：
+    1. 智能格式选择（AVIF/WEBP/JPEG）
+    2. 内存缓存提高响应速度
+    3. 强缓存和协商缓存支持
+    4. EXIF信息自动校正
+    
+    参数：
+    - size: 预览图片尺寸（64-1600像素）
+    - path: 图片文件路径
+    """
+    # 参数处理和验证
     try:
         size = int(size)
     except Exception:
         size = 256
-    size = max(64, min(1600, size))
+    size = max(64, min(1600, size))  # 限制尺寸范围
 
+    # 安全路径解析
     src = (EXTRACTED_DIR / path).resolve()
     if not src.exists() or EXTRACTED_DIR not in src.parents:
         raise HTTPException(status_code=404, detail="file not found")
 
+    # 协商缓存检查
     st = src.stat()
     etag = f'W/"{st.st_mtime_ns}-{st.st_size}-{size}"'
     if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304)
+        return Response(status_code=304)  # 未修改，使用缓存
 
+    # 选择最佳图片格式
     fmt = _best_preview_format(request.headers.get("accept", ""))
     key = (str(src), st.st_mtime_ns, size, fmt)
     buf = _PREVIEW_CACHE.get(key)
 
     media_type = "image/jpeg"
     if buf is None:
+        # 生成预览图片
         with PILImage.open(src) as im:
+            # 自动校正EXIF方向信息
             im = ImageOps.exif_transpose(im)
+            # 生成缩略图
             im.thumbnail((size, size), PILImage.LANCZOS)
 
             out = io.BytesIO()
             if fmt == "AVIF":
                 try:
+                    # 尝试AVIF格式（最高压缩率）
                     im.save(out, "AVIF", quality=50, speed=6)
                     media_type = "image/avif"
                 except Exception:
-                    # 平台无 AVIF 编码器时降级
+                    # 平台无AVIF编码器时降级到WEBP
                     im.save(out, "WEBP", quality=82, method=6)
                     media_type = "image/webp"
             elif fmt == "WEBP":
+                # WEBP格式
                 im.save(out, "WEBP", quality=82, method=6)
                 media_type = "image/webp"
             else:
+                # JPEG格式（兼容性最好）
                 if im.mode in ("RGBA", "LA"):
+                    # 处理透明通道：用黑色背景
                     bg = PILImage.new("RGB", im.size, (0, 0, 0))
                     bg.paste(im, mask=im.split()[-1])
                     im = bg
@@ -311,16 +342,17 @@ def preview_image(size: int, path: str, request: Request):
                 media_type = "image/jpeg"
             buf = out.getvalue()
 
-        # very small LRU
+        # 内存缓存管理（简单的LRU策略）
         if len(_PREVIEW_CACHE) > _PREVIEW_CACHE_MAX:
-            _PREVIEW_CACHE.clear()
+            _PREVIEW_CACHE.clear()  # 清空缓存
         _PREVIEW_CACHE[key] = buf
 
+    # 返回响应头
     headers = {
-        "Cache-Control": "public, max-age=31536000, immutable",
+        "Cache-Control": "public, max-age=31536000, immutable",  # 1年缓存
         "ETag": etag,
         "Last-Modified": time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(st.st_mtime)),
-        "Vary": "Accept",
+        "Vary": "Accept",  # 根据Accept头变化
     }
     return Response(content=buf, media_type=media_type, headers=headers)
 
@@ -452,6 +484,19 @@ async def gallery(
             )
             neg = or_(Image.rel_path.contains("泥浆"), Image.rel_path.contains("钻井液"))
             q = q.where(and_(pos, not_(neg)))
+        elif st == "壁心":
+            pos = or_(
+                Image.sample_type == "壁心",
+                Image.rel_path.contains("壁心"),
+            )
+            neg = or_(
+                Image.rel_path.contains("泥浆"), 
+                Image.rel_path.contains("钻井液"),
+                Image.rel_path.contains("岩屑"),
+                Image.rel_path.contains("岩心"),
+                Image.rel_path.contains("岩芯"),
+            )
+            q = q.where(and_(pos, not_(neg)))
         else:
             q = q.where(or_(Image.sample_type == st, Image.rel_path.contains(st)))
 
@@ -521,6 +566,16 @@ async def grouped(request: Request, well: Optional[str] = None):
     return templates.TemplateResponse(
         "grouped.html",
         {"request": request, "well": well or "", "stypes": stypes}
+    )
+
+@app.get("/log_align", response_class=HTMLResponse)
+async def log_align(request: Request):
+    """
+    录井PDF联动页面
+    """
+    return templates.TemplateResponse(
+        "log_align.html",
+        {"request": request}
     )
 
 # ==== 分组数据 API（带样品类型 & 起始深度）====

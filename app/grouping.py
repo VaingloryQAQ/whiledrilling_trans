@@ -9,7 +9,7 @@ from sqlmodel import Session, select
 from .models import Image
 from .config import load_app_config
 
-CATS_ORDER = ["荧光扫描", "单偏光", "正交光", "三维指纹", "三维立体", "色谱", "轻烃谱图"]
+CATS_ORDER = ["荧光扫描", "单偏光", "正交光", "三维指纹", "三维立体", "色谱谱图", "轻烃谱图", "热解谱图"]
 
 
 # ---------- 轻量对象 ----------
